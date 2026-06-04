@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>A股暗盘资金追踪器</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar" aria-label="筛选器概览">
+        <div>
+          <p class="eyebrow">A-Share Capital Flow Screener</p>
+          <h1>A股暗盘资金追踪器</h1>
+        </div>
+        <div class="actions">
+          <button id="refreshBtn" class="primary" type="button" title="刷新行情">↻ 刷新</button>
+          <button id="exportBtn" type="button" title="导出候选池">↓ CSV</button>
+        </div>
+      </section>
+
+      <nav class="view-tabs" aria-label="功能模块">
+        <button class="view-tab is-active" type="button" data-view="tracker">暗盘筛选</button>
+        <button class="view-tab" type="button" data-view="sectors">板块轮动</button>
+        <button class="view-tab" type="button" data-view="hot">热度龙头</button>
+      </nav>
+
+      <div id="trackerView">
+      <section class="control-band" aria-label="筛选参数">
+        <div class="mode-group" role="tablist" aria-label="筛选模式">
+          <button class="mode is-active" type="button" data-mode="balanced">均衡</button>
+          <button class="mode" type="button" data-mode="conservative">稳健</button>
+          <button class="mode" type="button" data-mode="aggressive">进攻</button>
+          <button class="mode" type="button" data-mode="capacity">容量</button>
+        </div>
+        <div class="filters">
+          <label>
+            <span>成交额下限</span>
+            <input id="minAmount" type="range" min="2" max="30" step="1" value="8">
+            <output id="minAmountOut">8亿</output>
+          </label>
+          <label>
+            <span>量比下限</span>
+            <input id="minVolumeRatio" type="range" min="0.8" max="4" step="0.1" value="1.2">
+            <output id="minVolumeRatioOut">1.2</output>
+          </label>
+          <label>
+            <span>最大涨幅</span>
+            <input id="maxChange" type="range" min="2" max="10" step="0.5" value="8">
+            <output id="maxChangeOut">8%</output>
+          </label>
+          <label>
+            <span>最大振幅</span>
+            <input id="maxAmplitude" type="range" min="4" max="12" step="0.5" value="9">
+            <output id="maxAmplitudeOut">9%</output>
+          </label>
+        </div>
+      </section>
+
+      <section class="metrics" aria-label="市场统计">
+        <div class="metric">
+          <span>候选数</span>
+          <strong id="candidateCount">--</strong>
+        </div>
+        <div class="metric">
+          <span>主力净额合计</span>
+          <strong id="totalMain">--</strong>
+        </div>
+        <div class="metric">
+          <span>超大单为正</span>
+          <strong id="positiveSuper">--</strong>
+        </div>
+        <div class="metric">
+          <span>平均量比</span>
+          <strong id="avgVolumeRatio">--</strong>
+        </div>
+      </section>
+
+      <section class="focus" aria-label="优先候选">
+        <div class="section-head">
+          <div>
+            <h2>优先候选</h2>
+            <p id="timestamp">等待刷新</p>
+          </div>
+          <span id="sourceBadge">公开行情估算</span>
+        </div>
+        <div id="focusList" class="focus-list"></div>
+      </section>
+
+      <section class="table-section" aria-label="候选明细">
+        <div class="section-head">
+          <div>
+            <h2>候选明细</h2>
+            <p>按综合分排序，可点击表头切换排序</p>
+          </div>
+          <input id="searchInput" type="search" placeholder="搜索代码或名称" aria-label="搜索代码或名称">
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th data-sort="score">分数</th>
+                <th data-sort="code">代码</th>
+                <th data-sort="name">名称</th>
+                <th data-sort="changePct">涨幅</th>
+                <th data-sort="amount">成交额</th>
+                <th data-sort="volumeRatio">量比</th>
+                <th data-sort="amplitude">振幅</th>
+                <th data-sort="turnover">换手</th>
+                <th data-sort="mainInflow">主力净额</th>
+                <th data-sort="superPct">超大单</th>
+                <th data-sort="largePct">大单</th>
+                <th>信号</th>
+                <th>风险线</th>
+              </tr>
+            </thead>
+            <tbody id="rowsBody"></tbody>
+          </table>
+        </div>
+      </section>
+      </div>
+
+      <div id="sectorView" hidden>
+        <section class="control-band" aria-label="板块轮动参数">
+          <div class="section-head compact">
+            <div>
+              <h2>A股板块资金轮动追踪</h2>
+              <p id="sectorTimestamp">等待刷新</p>
+            </div>
+            <span id="sectorSourceBadge">公开板块资金估算</span>
+          </div>
+          <div class="mode-group period-group" role="tablist" aria-label="轮动周期">
+            <button class="period is-active" type="button" data-period="1">今日</button>
+            <button class="period" type="button" data-period="3">3日</button>
+            <button class="period" type="button" data-period="5">5日</button>
+            <button class="period" type="button" data-period="10">10日</button>
+          </div>
+        </section>
+
+        <section class="metrics" aria-label="板块轮动统计">
+          <div class="metric">
+            <span>追踪板块</span>
+            <strong id="sectorCount">--</strong>
+          </div>
+          <div class="metric">
+            <span>强势/升温</span>
+            <strong id="sectorHotCount">--</strong>
+          </div>
+          <div class="metric">
+            <span>退潮板块</span>
+            <strong id="sectorFadeCount">--</strong>
+          </div>
+          <div class="metric">
+            <span>主力净额合计</span>
+            <strong id="sectorTotalMain">--</strong>
+          </div>
+        </section>
+
+        <section class="focus" aria-label="板块强弱概览">
+          <div class="section-head">
+            <div>
+              <h2>强势板块</h2>
+              <p>按轮动评分排序，点击卡片或表格行查看强势个股</p>
+            </div>
+            <input id="sectorSearchInput" type="search" placeholder="搜索板块名称" aria-label="搜索板块名称">
+          </div>
+          <div id="sectorFocusList" class="focus-list"></div>
+          <div id="sectorState" class="state-line" role="status"></div>
+        </section>
+
+        <section class="table-section" aria-label="板块排行榜">
+          <div class="section-head">
+            <div>
+              <h2>板块排行榜</h2>
+              <p>轮动评分 = 资金净流入 + 成交额放大 + 涨跌强度 + 上涨家数 + 连续性</p>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="sector-table">
+              <thead>
+                <tr>
+                  <th data-sector-sort="rank">排名</th>
+                  <th data-sector-sort="name">板块名称</th>
+                  <th data-sector-sort="changePct">今日涨跌幅</th>
+                  <th data-sector-sort="amount">成交额</th>
+                  <th data-sector-sort="amountChangePct">成交额变化</th>
+                  <th data-sector-sort="mainInflow">主力净流入估算</th>
+                  <th data-sector-sort="superInflow">超大单净流入估算</th>
+                  <th data-sector-sort="oneDayMain">近一日主力估算</th>
+                  <th data-sector-sort="oneDaySuper">近一日超大单估算</th>
+                  <th data-sector-sort="oneDayAmount">近一日成交额估算</th>
+                  <th data-sector-sort="oneDayAmountChange">近一日成交变化估算</th>
+                  <th data-sector-sort="oneDayFundRankChange">资金排名变化估算</th>
+                  <th data-sector-sort="upRatio">上涨家数占比</th>
+                  <th data-sector-sort="volumeRatio">量比均值</th>
+                  <th data-sector-sort="rotationScore">轮动评分</th>
+                  <th data-sector-sort="rankChange">排名变化</th>
+                  <th>状态</th>
+                </tr>
+              </thead>
+              <tbody id="sectorRowsBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="table-section" aria-label="板块详情">
+          <div class="section-head">
+            <div>
+              <h2 id="sectorDetailTitle">板块详情</h2>
+              <p id="sectorDetailMeta">选择一个板块查看强势个股、原因和风险线</p>
+            </div>
+            <span id="sectorDetailBadge">等待选择</span>
+          </div>
+          <div id="sectorDetailCards" class="detail-grid"></div>
+          <div class="news-panel">
+            <div class="section-head compact">
+              <div>
+                <h2>利好消息</h2>
+                <p>匹配板块名称、核心个股和热门概念关键词</p>
+              </div>
+            </div>
+            <div id="sectorNewsList" class="news-list"></div>
+          </div>
+          <div class="table-wrap detail-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>分数</th>
+                  <th>代码</th>
+                  <th>名称</th>
+                  <th>涨幅</th>
+                  <th>成交额</th>
+                  <th>量比</th>
+                  <th>振幅</th>
+                  <th>换手</th>
+                  <th>主力净额</th>
+                  <th>超大单</th>
+                  <th>大单</th>
+                  <th>信号</th>
+                  <th>风险线</th>
+                </tr>
+              </thead>
+              <tbody id="sectorDetailRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <div id="hotView" hidden>
+        <section class="control-band" aria-label="热度龙头参数">
+          <div class="section-head compact">
+            <div>
+              <h2>热度龙头监控</h2>
+              <p id="hotTimestamp">等待刷新</p>
+            </div>
+            <span id="hotSourceBadge">同花顺热度榜</span>
+          </div>
+          <div class="mode-group period-group" role="tablist" aria-label="热度观察周期">
+            <button class="hot-period is-active" type="button" data-hot-period="1">今日</button>
+            <button class="hot-period" type="button" data-hot-period="3">3日</button>
+            <button class="hot-period" type="button" data-hot-period="5">5日</button>
+          </div>
+        </section>
+
+        <section class="metrics" aria-label="热度龙头统计">
+          <div class="metric">
+            <span>候选数</span>
+            <strong id="hotCount">--</strong>
+          </div>
+          <div class="metric">
+            <span>强关注</span>
+            <strong id="hotStrongCount">--</strong>
+          </div>
+          <div class="metric">
+            <span>资金双正</span>
+            <strong id="hotPositiveFlow">--</strong>
+          </div>
+          <div class="metric">
+            <span>平均评分</span>
+            <strong id="hotAvgScore">--</strong>
+          </div>
+        </section>
+
+        <section class="focus" aria-label="热度龙头概览">
+          <div class="section-head">
+            <div>
+              <h2>优先龙头</h2>
+              <p>按综合评分排序，点击个股模块弹出承接条件和风险线</p>
+            </div>
+            <input id="hotSearchInput" type="search" placeholder="搜索代码或名称" aria-label="搜索代码或名称">
+          </div>
+          <div id="hotFocusList" class="focus-list"></div>
+          <div id="hotState" class="state-line" role="status"></div>
+        </section>
+
+        <section class="table-section" aria-label="龙头类型说明">
+          <div class="section-head">
+            <div>
+              <h2>龙头类型说明</h2>
+              <p>用于区分热度来源、资金承接和板块位置</p>
+            </div>
+          </div>
+          <div class="leader-type-guide">
+            <article>
+              <strong>核心龙头</strong>
+              <span>热度排名靠前，板块内成交额居前，具备资金和辨识度双重优势。</span>
+            </article>
+            <article>
+              <strong>情绪龙头</strong>
+              <span>热度排名很高，市场关注集中，短线弹性强，承接质量决定持续性。</span>
+            </article>
+            <article>
+              <strong>趋势龙头</strong>
+              <span>主力资金为正，涨幅在板块内靠前，偏向沿趋势推进。</span>
+            </article>
+            <article>
+              <strong>补涨龙头</strong>
+              <span>板块已有主线热度，个股处在跟随或低位扩散阶段，重点看放量承接。</span>
+            </article>
+          </div>
+        </section>
+
+        <section class="table-section" aria-label="热度龙头排行榜">
+          <div class="section-head">
+            <div>
+              <h2>热度龙头排行榜</h2>
+              <p>综合评分 = 热度榜 + 暗盘承接 + 龙头辨识度 + 风险收益比</p>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="hot-table">
+              <thead>
+                <tr>
+                  <th data-hot-sort="rank">综合排名</th>
+                  <th data-hot-sort="code">代码</th>
+                  <th data-hot-sort="name">名称</th>
+                  <th data-hot-sort="sectorName">所属板块</th>
+                  <th data-hot-sort="heatRank">热度排名</th>
+                  <th data-hot-sort="rankChange">热度变化</th>
+                  <th data-hot-sort="changePct">涨跌幅</th>
+                  <th data-hot-sort="amount">成交额</th>
+                  <th data-hot-sort="volumeRatio">量比</th>
+                  <th data-hot-sort="amplitude">振幅</th>
+                  <th data-hot-sort="turnover">换手率</th>
+                  <th data-hot-sort="mainInflow">主力净流入</th>
+                  <th data-hot-sort="superInflow">超大单净流入</th>
+                  <th data-hot-sort="leaderType">龙头类型</th>
+                  <th data-hot-sort="conceptNote">炒作概念/备注</th>
+                  <th data-hot-sort="totalScore">综合评分</th>
+                  <th data-hot-sort="grade">推荐等级</th>
+                  <th>短线承接理由</th>
+                  <th>风险收益判断</th>
+                  <th>风险线</th>
+                  <th>失效条件</th>
+                </tr>
+              </thead>
+              <tbody id="hotRowsBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+      </div>
+    </main>
+
+    <div id="hotDetailModal" class="modal-backdrop" hidden>
+      <section class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="hotDetailTitle">
+        <div class="section-head">
+          <div>
+            <h2 id="hotDetailTitle">热度龙头详情</h2>
+            <p id="hotDetailMeta">选择一只股票查看热度、承接、板块定位和失效条件</p>
+          </div>
+          <div class="modal-actions">
+            <span id="hotDetailBadge">等待选择</span>
+            <button id="hotDetailClose" type="button" aria-label="关闭热度龙头详情">×</button>
+          </div>
+        </div>
+        <div id="hotDetailCards" class="detail-grid hot-detail-grid"></div>
+      </section>
+    </div>
+
+    <div id="toast" role="status" aria-live="polite"></div>
+    <script src="./app.js"></script>
+  </body>
+</html>

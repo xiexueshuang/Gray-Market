@@ -15,7 +15,7 @@ const DISK_CACHE_MS = 24 * 60 * 60_000;
 const HOT_LEADER_CACHE_NAME = "hot-leaders-v2";
 const DATA_PROVIDER = String(process.env.MARKET_DATA_PROVIDER || "hithink").toLowerCase();
 const HITHINK_ASTOCK_CLI =
-  process.env.HITHINK_ASTOCK_CLI || "/Users/xiexuelong/.codex/skills/hithink-astock-selector/scripts/cli.py";
+  process.env.HITHINK_ASTOCK_CLI || "hithink-astock-cli";
 const HITHINK_LIMIT = Math.min(1000, Math.max(50, Number(process.env.HITHINK_LIMIT || 500)));
 const HITHINK_QUERY =
   process.env.HITHINK_QUERY ||

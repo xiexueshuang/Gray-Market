@@ -33,62 +33,7 @@ node -v
 npm -v
 ```
 
-### 2. 安装 Git
-
-Git 用于克隆项目、提交修改和推送到 GitHub。
-
-- Git 官方下载：[https://git-scm.com/downloads](https://git-scm.com/downloads)
-- GitHub 克隆仓库说明：[https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository)
-
-检查版本：
-
-```bash
-git --version
-```
-
-### 3. 配置 GitHub SSH
-
-需要向 GitHub 推送代码时，建议配置 SSH Key。
-
-- 生成 SSH Key 并添加到 ssh-agent：[GitHub Docs](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/generating-a-new-ssh-key-and-adding-it-to-the-ssh-agent)
-- 添加 SSH Key 到 GitHub 账号：[GitHub Docs](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/adding-a-new-ssh-key-to-your-github-account)
-
-生成 SSH Key：
-
-```bash
-ssh-keygen -t ed25519 -C "your_email@example.com"
-```
-
-启动 ssh-agent 并添加私钥：
-
-```bash
-eval "$(ssh-agent -s)"
-ssh-add ~/.ssh/id_ed25519
-```
-
-查看公钥内容：
-
-```bash
-cat ~/.ssh/id_ed25519.pub
-```
-
-把公钥添加到 GitHub 后，测试连接：
-
-```bash
-ssh -T git@github.com
-```
-
-### 4. 克隆项目并安装依赖
-
-```bash
-git clone <repository-url>
-cd <project-folder>
-npm install
-```
-
-当前项目没有第三方 npm 依赖，`npm install` 会根据 `package.json` 完成标准初始化流程。
-
-### 5. 配置行情数据 CLI
+### 2. 配置行情数据 CLI
 
 本项目通过 `HITHINK_ASTOCK_CLI` 调用本地行情数据 CLI。该 CLI 需要兼容以下命令参数：
 
@@ -126,7 +71,7 @@ hithink-astock-cli
 "$HITHINK_ASTOCK_CLI" --query "今日A股涨幅前10" --page 1 --limit 10 --timeout 30
 ```
 
-### 6. 配置利好消息 API Key
+### 3. 配置利好消息 API Key
 
 板块利好消息功能需要 `IWENCAI_API_KEY`。请把 API Key 保存在本机环境变量或部署平台的 Secrets 中。
 
@@ -178,21 +123,6 @@ npm run dev
 
 ```bash
 npm test
-```
-
-推送到 GitHub：
-
-```bash
-git remote add origin <repository-ssh-url>
-git branch -M main
-git push -u origin main
-```
-
-已有 `origin` 时更新远程地址：
-
-```bash
-git remote set-url origin <repository-ssh-url>
-git push -u origin main
 ```
 
 ## 环境变量

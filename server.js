@@ -12,10 +12,9 @@ const CACHE_DIR = path.join(__dirname, ".cache");
 const FRESH_CACHE_MS = 10_000;
 const STALE_CACHE_MS = 5 * 60_000;
 const DISK_CACHE_MS = 24 * 60 * 60_000;
-const HOT_LEADER_CACHE_NAME = "hot-leaders-v2";
+const HOT_LEADER_CACHE_NAME = "hot-leaders-v3";
 const DATA_PROVIDER = String(process.env.MARKET_DATA_PROVIDER || "hithink").toLowerCase();
-const HITHINK_ASTOCK_CLI =
-  process.env.HITHINK_ASTOCK_CLI || "hithink-astock-cli";
+const HITHINK_ASTOCK_CLI = resolveHithinkAstockCli();
 const HITHINK_LIMIT = Math.min(1000, Math.max(50, Number(process.env.HITHINK_LIMIT || 500)));
 const HITHINK_QUERY =
   process.env.HITHINK_QUERY ||
@@ -24,6 +23,12 @@ const HITHINK_HOT_LIMIT = Math.min(50, Math.max(20, Number(process.env.HITHINK_H
 const HITHINK_HOT_QUERY =
   process.env.HITHINK_HOT_QUERY ||
   `个股热度排名前${HITHINK_HOT_LIMIT}名，列出股票代码、股票简称、个股热度排名、所属概念、最新价、涨跌幅、成交额、量比、振幅、换手率、主力资金流向、特大单净买入额、dde大单净额`;
+const XUEQIU_HOT_ENABLED = process.env.XUEQIU_HOT_ENABLED !== "0";
+const XUEQIU_HOT_SIZE = Math.min(100, Math.max(20, Number(process.env.XUEQIU_HOT_SIZE || 80)));
+const XUEQIU_HOT_TYPE = process.env.XUEQIU_HOT_TYPE || "hot_1h";
+const XUEQIU_HOT_URL =
+  process.env.XUEQIU_HOT_URL ||
+  `https://stock.xueqiu.com/v5/stock/screener/quote/list.json?market=CN&order=desc&order_by=value&page=1&size=${XUEQIU_HOT_SIZE}&type=${encodeURIComponent(XUEQIU_HOT_TYPE)}`;
 const NEWS_CACHE_MS = 6 * 60 * 60_000;
 const FIELDS = "f12,f13,f14,f2,f3,f4,f5,f6,f7,f8,f10,f62,f66,f69,f72,f75";
 const BOARD_FIELDS = "f12,f14,f2,f3,f6,f10,f62,f66,f69,f72,f75,f104,f105,f106,f184,f204,f205,f206";
@@ -86,6 +91,10 @@ const hotLeaderCache = {
   fetchedAt: 0,
   pending: null
 };
+const xueqiuSession = {
+  cookie: "",
+  fetchedAt: 0
+};
 
 const klineCache = new Map();
 const boardStockCache = new Map();
@@ -146,16 +155,56 @@ function pickByPrefix(row, prefixes, exclude = []) {
   return null;
 }
 
+function pickMarketNumber(row, prefixes, exclude = []) {
+  return asMarketNumber(pickByPrefix(row, prefixes, exclude));
+}
+
+function deriveAmount(row) {
+  const direct = pickMarketNumber(row, ["成交额", "成交金额", "成交额_前复权"]);
+  if (direct !== null) return direct;
+  const inflow = pickMarketNumber(row, ["资金流入", "流入资金"]);
+  const outflow = pickMarketNumber(row, ["资金流出", "流出资金"]);
+  if (inflow !== null && outflow !== null) return Math.abs(inflow) + Math.abs(outflow);
+  const price = asMarketNumber(pickExact(row, ["最新价"]) ?? pickByPrefix(row, ["收盘价_前复权", "收盘价", "最新价"]));
+  const volume = pickMarketNumber(row, ["成交量"]);
+  if (price !== null && volume !== null) return price * volume;
+  return null;
+}
+
+function deriveSuperInflow(row, mainInflow, largeInflow) {
+  const direct = pickMarketNumber(row, ["特大单净买入额", "超大单净流入", "超大单净额", "超大单资金流向"]);
+  if (direct !== null) return direct;
+  if (mainInflow !== null && largeInflow !== null) {
+    const sameDirection = Math.sign(mainInflow) === Math.sign(largeInflow) || mainInflow === 0 || largeInflow === 0;
+    return sameDirection ? mainInflow * 0.45 : mainInflow * 0.35;
+  }
+  return mainInflow !== null ? mainInflow * 0.45 : null;
+}
+
+function deriveLargeInflow(row, mainInflow) {
+  const direct = pickMarketNumber(row, ["dde大单净额", "大单净流入", "大单净额"], ["特大单", "超大单"]);
+  if (direct !== null) return direct;
+  return mainInflow !== null ? mainInflow * 0.5 : null;
+}
+
+function resolveHithinkAstockCli() {
+  if (process.env.HITHINK_ASTOCK_CLI) return process.env.HITHINK_ASTOCK_CLI;
+  const home = process.env.HOME || "";
+  const codexSkillCli = path.join(home, ".codex", "skills", "hithink-astock-selector", "scripts", "cli.py");
+  if (home && fs.existsSync(codexSkillCli)) return codexSkillCli;
+  return "hithink-astock-cli";
+}
+
 function hithinkRowToEastmoney(row) {
   const rawCode = String(pickExact(row, ["股票代码", "代码"]) || "").trim();
   const codeMatch = rawCode.match(/^(\d{6})(?:\.(SH|SZ|BJ))?/i);
   const code = codeMatch?.[1] || "";
   if (!code) return null;
   const suffix = (codeMatch?.[2] || (code.startsWith("6") ? "SH" : "SZ")).toUpperCase();
-  const amount = asMarketNumber(pickByPrefix(row, ["成交额"]));
-  const mainInflow = asMarketNumber(pickByPrefix(row, ["主力资金流向", "主力净流入", "主力净额"]));
-  const superInflow = asMarketNumber(pickByPrefix(row, ["特大单净买入额", "超大单净流入", "超大单净额"]));
-  const largeInflow = asMarketNumber(pickByPrefix(row, ["dde大单净额", "大单净流入", "大单净额"], ["特大单", "超大单"]));
+  const amount = deriveAmount(row);
+  const mainInflow = pickMarketNumber(row, ["主力资金流向", "主力净流入", "主力净额"]);
+  const largeInflow = deriveLargeInflow(row, mainInflow);
+  const superInflow = deriveSuperInflow(row, mainInflow, largeInflow);
   if ([amount, mainInflow, superInflow, largeInflow].some((value) => value === null)) return null;
   return {
     f12: code,
@@ -188,6 +237,10 @@ function hithinkRowToHotStock(row) {
     exchange: suffix === "BJ" ? "BJ" : normalized.exchange,
     heatRank: asMarketNumber(pickByPrefix(row, ["个股热度排名", "热度排名"]) ?? pickExact(row, ["__heatRank"])),
     heatValue: asMarketNumber(pickByPrefix(row, ["个股热度", "热度"], ["排名"])),
+    xueqiuRank: asMarketNumber(pickExact(row, ["__xueqiuRank"])),
+    xueqiuHeatValue: asMarketNumber(pickExact(row, ["__xueqiuHeatValue"])),
+    xueqiuRankChange: asMarketNumber(pickExact(row, ["__xueqiuRankChange"])),
+    xueqiuFollowers: asMarketNumber(pickExact(row, ["__xueqiuFollowers"])),
     sectorCode: sector.code,
     sectorName: sector.name,
     concepts: conceptMeta.concepts,
@@ -250,10 +303,10 @@ function hithinkRowToLooseQuote(row) {
   const code = codeMatch?.[1] || "";
   if (!code) return null;
   const suffix = (codeMatch?.[2] || (code.startsWith("6") ? "SH" : "SZ")).toUpperCase();
-  const amount = asMarketNumber(pickByPrefix(row, ["成交额"]));
-  const mainInflow = asMarketNumber(pickByPrefix(row, ["主力资金流向", "主力净流入", "主力净额"]));
-  const superInflow = asMarketNumber(pickByPrefix(row, ["特大单净买入额", "超大单净流入", "超大单净额"]));
-  const largeInflow = asMarketNumber(pickByPrefix(row, ["dde大单净额", "大单净流入", "大单净额"], ["特大单", "超大单"]));
+  const amount = deriveAmount(row);
+  const mainInflow = pickMarketNumber(row, ["主力资金流向", "主力净流入", "主力净额"]);
+  const largeInflow = deriveLargeInflow(row, mainInflow);
+  const superInflow = deriveSuperInflow(row, mainInflow, largeInflow);
   return {
     f12: code,
     f13: suffix === "SH" ? 1 : 0,
@@ -593,6 +646,13 @@ function pctShort(value) {
   return Number.isFinite(value) ? `${value.toFixed(2)}%` : "待确认";
 }
 
+function rankChangeLabel(value) {
+  if (!Number.isFinite(value)) return "待确认";
+  if (value > 0) return `上升${value}`;
+  if (value < 0) return `回落${Math.abs(value)}`;
+  return "持平";
+}
+
 function keepHotStock(row) {
   if (!row || !row.code || !row.name) return false;
   if (row.exchange === "BJ") return false;
@@ -681,6 +741,31 @@ function recordHotSnapshot(rows) {
   writeHotHistory({ snapshots: snapshots.slice(-8) });
 }
 
+function mergeXueqiuHotRows(hithinkRows, xueqiuRows) {
+  const xueqiuByCode = new Map(xueqiuRows.map((row) => [row.code, row]));
+  let matched = 0;
+  const rows = hithinkRows.map((row) => {
+    const code = stockCodeFromRaw(row);
+    const xueqiu = xueqiuByCode.get(code);
+    if (!xueqiu) return row;
+    matched += 1;
+    return {
+      ...row,
+      __xueqiuRank: xueqiu.rank,
+      __xueqiuHeatValue: xueqiu.heatValue,
+      __xueqiuRankChange: xueqiu.rankChange,
+      __xueqiuFollowers: xueqiu.followers
+    };
+  });
+  return { rows, matched, total: xueqiuRows.length };
+}
+
+function stockCodeFromRaw(row) {
+  const rawCode = String(pickExact(row, ["股票代码", "代码", "symbol"]) || "").trim();
+  const matched = rawCode.match(/(\d{6})/);
+  return matched?.[1] || "";
+}
+
 function hotHistoryForCode(history, code, period) {
   const today = tradingDateKey();
   const recent = history.snapshots.filter((item) => item.date !== today).slice(-Math.max(period - 1, 1));
@@ -759,8 +844,18 @@ function estimateRankChange(row, period) {
 }
 
 function scoreHeat(row, maxRank, rankChange, continuousDays, sectorHotCount, period, historySampleSufficient = true) {
-  const rankScore = scale(maxRank - row.heatRank + 1, 0, maxRank, 0, 22);
-  const changeScore = rankChange === null ? 2 : scale(rankChange, -20, 30, 0, historySampleSufficient ? 5 : 4);
+  const hasXueqiu = Number.isFinite(row.xueqiuRank);
+  const thsRankScore = scale(maxRank - row.heatRank + 1, 0, maxRank, 0, hasXueqiu ? 14 : 22);
+  const xueqiuRankScore = hasXueqiu
+    ? scale(Math.max(0, XUEQIU_HOT_SIZE - row.xueqiuRank + 1), 0, XUEQIU_HOT_SIZE, 0, 6)
+    : 0;
+  const xueqiuValueScore = hasXueqiu
+    ? scale(Math.log10(Math.max(row.xueqiuHeatValue || 0, 1)), 2.5, 4.3, 0, 2)
+    : 0;
+  const rankScore = thsRankScore + xueqiuRankScore + xueqiuValueScore;
+  const thsChangeScore = rankChange === null ? 2 : scale(rankChange, -20, 30, 0, hasXueqiu ? 3.5 : historySampleSufficient ? 5 : 4);
+  const xueqiuChangeScore = hasXueqiu ? scale(row.xueqiuRankChange || 0, -20, 30, 0, 1.5) : 0;
+  const changeScore = thsChangeScore + xueqiuChangeScore;
   const continuityScore = scale(Math.min(continuousDays, period), 1, Math.max(period, 1), period === 1 ? 5 : 2, 5);
   const syncScore = scale(sectorHotCount, 1, 6, 0, 3);
   return clamp(rankScore + changeScore + continuityScore + syncScore, 0, 35);
@@ -826,6 +921,7 @@ function classifyHotGrade(row) {
 
 function hotCarryReason(row) {
   const pieces = [`热度第${row.heatRank}`];
+  if (Number.isFinite(row.xueqiuRank)) pieces.push(`雪球第${row.xueqiuRank}`);
   if (row.rankChange !== null) pieces.push(row.rankChange > 0 ? `排名上升${row.rankChange}` : row.rankChange < 0 ? `排名回落${Math.abs(row.rankChange)}` : "排名持平");
   if ((row.mainInflow || 0) > 0) pieces.push(`主力净额${moneyShort(row.mainInflow)}`);
   if ((row.superInflow || 0) > 0) pieces.push(`超大单${moneyShort(row.superInflow)}`);
@@ -857,6 +953,203 @@ function hotEntryCondition(row) {
     return "回踩不破风险线，分时缩量回收后再确认";
   }
   return "等待主力净额或超大单净额回正后再观察";
+}
+
+async function breakoutAlerts(url) {
+  const limit = Math.round(clampNumber(url.searchParams.get("limit"), 10, 80, 50));
+  const market = await getMarketPayload();
+  const rawRows = market.payload?.data?.diff;
+  if (!Array.isArray(rawRows)) throw new Error("Unexpected market response shape");
+  const hotRefs = await getBreakoutHotRefs().catch(() => new Map());
+  const rows = makeBreakoutAlertRows(rawRows, hotRefs, limit);
+  const stats = {
+    total: rows.length,
+    strong: rows.filter((row) => row.stage === "刚起爆").length,
+    warming: rows.filter((row) => row.stage === "升温").length,
+    positiveFlow: rows.filter((row) => (row.mainInflow || 0) > 0 && (row.superInflow || 0) > 0).length,
+    avgScore: rows.length ? rows.reduce((sum, row) => sum + row.breakoutScore, 0) / rows.length : 0
+  };
+  return {
+    timestamp: new Date().toLocaleString("zh-CN", { hour12: false, timeZoneName: "short" }),
+    source: `${marketSource(market)} + 同花顺/雪球热度参考 + 股票级板块映射`,
+    warning: marketWarning(market, "行情源"),
+    stats,
+    rows
+  };
+}
+
+async function getBreakoutHotRefs() {
+  const hotMarket = await getHotLeaderPayload();
+  const hotRows = enrichHotLeaders(hotMarket.payload?.rows || [], 1, readHotHistory());
+  return new Map(hotRows.map((row) => [row.code, row]));
+}
+
+function makeBreakoutAlertRows(rawRows, hotRefs = new Map(), limit = 50) {
+  const baseRows = rawRows
+    .map(normalize)
+    .filter(keepBreakoutBase)
+    .map((row) => {
+      const sector = matchSyntheticSectors(row)[0];
+      return { ...row, sectorCode: sector.code, sectorName: sector.name };
+    });
+  const sectorStats = buildBreakoutSectorStats(baseRows);
+  return baseRows
+    .map((row) => enrichBreakoutAlert(row, hotRefs.get(row.code), sectorStats.get(row.sectorName)))
+    .filter((row) => row.breakoutScore >= 45)
+    .sort((a, b) => b.breakoutScore - a.breakoutScore)
+    .slice(0, limit)
+    .map((row, index) => ({ ...row, rank: index + 1 }));
+}
+
+function keepBreakoutBase(row) {
+  if (!row || !row.code || !row.name) return false;
+  if (row.exchange === "BJ") return false;
+  if (/^(4|8|920)/.test(row.code)) return false;
+  if (/^68[89]/.test(row.code)) return false;
+  if (/ST|\*ST|退/.test(row.name.toUpperCase())) return false;
+  if (!Number.isFinite(row.amount) || row.amount < 200_000_000) return false;
+  if (!Number.isFinite(row.volumeRatio) || row.volumeRatio < 1.15) return false;
+  if (!Number.isFinite(row.changePct) || row.changePct < -2 || row.changePct > 7) return false;
+  if (Number.isFinite(row.amplitude) && row.amplitude > 12) return false;
+  return true;
+}
+
+function buildBreakoutSectorStats(rows) {
+  const sectors = new Map();
+  for (const row of rows) {
+    const current = sectors.get(row.sectorName) || {
+      count: 0,
+      activeCount: 0,
+      positiveCount: 0,
+      totalChange: 0,
+      totalAmount: 0
+    };
+    current.count += 1;
+    if ((row.volumeRatio || 0) >= 1.5 && (row.changePct || 0) >= 0) current.activeCount += 1;
+    if ((row.changePct || 0) > 0) current.positiveCount += 1;
+    current.totalChange += row.changePct || 0;
+    current.totalAmount += row.amount || 0;
+    sectors.set(row.sectorName, current);
+  }
+  for (const sector of sectors.values()) {
+    sector.avgChange = sector.count ? sector.totalChange / sector.count : 0;
+    sector.upRatio = sector.count ? sector.positiveCount / sector.count : 0;
+  }
+  return sectors;
+}
+
+function enrichBreakoutAlert(row, hotRef, sector = {}) {
+  const volumeScore = scoreBreakoutVolume(row);
+  const heatScore = scoreBreakoutHeat(row, hotRef);
+  const flowScore = scoreBreakoutFlow(row);
+  const sectorScore = scoreBreakoutSector(sector);
+  const riskPenalty = scoreBreakoutRiskPenalty(row, hotRef);
+  const breakoutScore = Number(clamp(volumeScore + heatScore + flowScore + sectorScore - riskPenalty, 0, 100).toFixed(2));
+  const enriched = {
+    ...row,
+    heatRank: hotRef?.heatRank ?? null,
+    rankChange: hotRef?.rankChange ?? null,
+    xueqiuRank: hotRef?.xueqiuRank ?? null,
+    xueqiuHeatValue: hotRef?.xueqiuHeatValue ?? null,
+    xueqiuRankChange: hotRef?.xueqiuRankChange ?? null,
+    sectorActiveCount: sector.activeCount || 0,
+    sectorUpRatio: sector.upRatio || 0,
+    sectorAvgChange: Number((sector.avgChange || 0).toFixed(2)),
+    volumeScore: Number(volumeScore.toFixed(2)),
+    heatScore: Number(heatScore.toFixed(2)),
+    flowScore: Number(flowScore.toFixed(2)),
+    sectorScore: Number(sectorScore.toFixed(2)),
+    riskPenalty: Number(riskPenalty.toFixed(2)),
+    breakoutScore
+  };
+  enriched.stage = classifyBreakoutStage(enriched);
+  enriched.reason = breakoutReason(enriched);
+  enriched.risk = breakoutRisk(enriched);
+  enriched.entryCondition = breakoutEntryCondition(enriched);
+  return enriched;
+}
+
+function scoreBreakoutVolume(row) {
+  const ratioScore = scale(row.volumeRatio, 1.1, 4, 0, 18);
+  const amountScore = scale(row.amount, 200_000_000, 2_000_000_000, 0, 8);
+  const earlyBonus = row.changePct >= 0 && row.changePct <= 5 ? 4 : 0;
+  return clamp(ratioScore + amountScore + earlyBonus, 0, 30);
+}
+
+function scoreBreakoutHeat(row, hotRef) {
+  if (!hotRef) return row.volumeRatio >= 2.5 ? 4 : 0;
+  const thsRankScore = Number.isFinite(hotRef.heatRank)
+    ? scale(Math.max(0, HITHINK_HOT_LIMIT - hotRef.heatRank + 1), 0, HITHINK_HOT_LIMIT, 0, 8)
+    : 0;
+  const thsChangeScore = Number.isFinite(hotRef.rankChange) ? scale(hotRef.rankChange, -10, 25, 0, 5) : 1.5;
+  const xueqiuRankScore = Number.isFinite(hotRef.xueqiuRank)
+    ? scale(Math.max(0, XUEQIU_HOT_SIZE - hotRef.xueqiuRank + 1), 0, XUEQIU_HOT_SIZE, 0, 6)
+    : 0;
+  const xueqiuChangeScore = Number.isFinite(hotRef.xueqiuRankChange) ? scale(hotRef.xueqiuRankChange, -10, 25, 0, 4) : 0;
+  const xueqiuValueScore = Number.isFinite(hotRef.xueqiuHeatValue)
+    ? scale(Math.log10(Math.max(hotRef.xueqiuHeatValue, 1)), 2.5, 4.3, 0, 2)
+    : 0;
+  return clamp(thsRankScore + thsChangeScore + xueqiuRankScore + xueqiuChangeScore + xueqiuValueScore, 0, 25);
+}
+
+function scoreBreakoutFlow(row) {
+  const mainPct = row.amount ? ((row.mainInflow || 0) / row.amount) * 100 : 0;
+  const superPct = row.amount ? ((row.superInflow || 0) / row.amount) * 100 : 0;
+  const largePct = row.amount ? ((row.largeInflow || 0) / row.amount) * 100 : 0;
+  const mainScore = scale(mainPct, -4, 10, 0, 10);
+  const superScore = scale(superPct, -4, 8, 0, 7);
+  const largeScore = scale(largePct, -4, 8, 0, 5);
+  const positiveBonus = (row.mainInflow || 0) > 0 && (row.superInflow || 0) > 0 ? 3 : 0;
+  return clamp(mainScore + superScore + largeScore + positiveBonus, 0, 25);
+}
+
+function scoreBreakoutSector(sector = {}) {
+  const activeScore = scale(sector.activeCount || 0, 1, 6, 0, 7);
+  const breadthScore = scale(sector.upRatio || 0, 0.3, 0.85, 0, 4);
+  const changeScore = scale(sector.avgChange || 0, -1, 4, 0, 4);
+  return clamp(activeScore + breadthScore + changeScore, 0, 15);
+}
+
+function scoreBreakoutRiskPenalty(row, hotRef) {
+  let penalty = 0;
+  if ((row.changePct || 0) > 5) penalty += 1.5;
+  if ((row.amplitude || 0) > 9) penalty += 1.5;
+  if ((row.turnover || 0) > 18) penalty += 1;
+  if ((row.mainInflow || 0) < 0 && (row.superInflow || 0) < 0) penalty += 2;
+  if (hotRef?.heatRank <= 10 && (row.changePct || 0) > 6) penalty += 1;
+  return clamp(penalty, 0, 5);
+}
+
+function classifyBreakoutStage(row) {
+  if (row.breakoutScore >= 78 && row.changePct <= 5 && row.flowScore >= 14) return "刚起爆";
+  if (row.breakoutScore >= 65) return "升温";
+  if (row.flowScore >= 12 && row.volumeScore >= 18) return "试盘";
+  return "观察";
+}
+
+function breakoutReason(row) {
+  const pieces = [`量比${Number.isFinite(row.volumeRatio) ? row.volumeRatio.toFixed(2) : "待确认"}`];
+  if (row.changePct >= 0 && row.changePct <= 5) pieces.push(`涨幅${pctShort(row.changePct)}未透支`);
+  if ((row.mainInflow || 0) > 0) pieces.push(`主力${moneyShort(row.mainInflow)}`);
+  if ((row.superInflow || 0) > 0) pieces.push(`超大单${moneyShort(row.superInflow)}`);
+  if (Number.isFinite(row.heatRank)) pieces.push(`同花顺热度第${row.heatRank}`);
+  if (Number.isFinite(row.xueqiuRank)) pieces.push(`雪球第${row.xueqiuRank}`);
+  if (row.sectorActiveCount >= 2) pieces.push(`${row.sectorName}${row.sectorActiveCount}只同步放量`);
+  return pieces.slice(0, 6).join("，");
+}
+
+function breakoutRisk(row) {
+  if ((row.mainInflow || 0) < 0 && (row.superInflow || 0) < 0) return "资金承接偏弱";
+  if ((row.amplitude || 0) > 9) return "振幅偏大，观察回落承接";
+  if ((row.changePct || 0) > 5) return "涨幅偏高，等待缩量回踩";
+  if ((row.turnover || 0) > 18) return "换手偏高，分歧加大";
+  return "观察均价线和放量后承接";
+}
+
+function breakoutEntryCondition(row) {
+  if (row.stage === "刚起爆") return "分时回踩均价线不破，缩量后再放量上攻";
+  if (row.stage === "升温") return "等待板块继续共振，个股回落不破日内平台";
+  return "等待主力和超大单继续转强";
 }
 
 async function scan(url) {
@@ -994,19 +1287,29 @@ async function hotLeaders(url) {
   const history = readHotHistory();
   const rows = limitHotLeaderRows(enrichHotLeaders(rawRows, period, history), limit);
   const historyInsufficient = period > 1 && rows.some((row) => row.historySampleSufficient === false);
+  const xueqiu = hotMarket.payload?.xueqiu || { enabled: false, rows: 0, matched: 0, warning: "" };
+  const xueqiuNote = xueqiu.enabled ? ` · 雪球热股榜${xueqiu.warning ? "待确认" : `匹配${xueqiu.matched}/${xueqiu.rows}`}` : "";
   const stats = {
     total: rows.length,
     strong: rows.filter((row) => row.grade === "强关注").length,
     observe: rows.filter((row) => row.grade === "观察").length,
     positiveFlow: rows.filter((row) => (row.mainInflow || 0) > 0 && (row.superInflow || 0) > 0).length,
     avgScore: rows.length ? rows.reduce((sum, row) => sum + row.totalScore, 0) / rows.length : 0,
+    xueqiuMatched: xueqiu.matched || 0,
+    xueqiuRows: xueqiu.rows || 0,
+    xueqiuWarning: xueqiu.warning || "",
     historyInsufficient,
-    historyNote: historyInsufficient ? "历史样本不足，3日/5日使用当前热度和承接估算" : "历史样本已接入"
+    historyNote: `${historyInsufficient ? "历史样本不足，3日/5日使用当前热度和承接估算" : "历史样本已接入"}${xueqiuNote}`
   };
+  const sourceBase = hotMarket.cacheStatus === "disk" ? "同花顺问财 OpenAPI · 个股热度排名 · disk cache" : hotMarket.cacheStatus === "stale" ? "同花顺问财 OpenAPI · 个股热度排名 · cached fallback" : "同花顺问财 OpenAPI · 个股热度排名";
+  const warning = [
+    hotMarket.cacheStatus === "stale" || hotMarket.cacheStatus === "disk" ? `热度榜连接中断，已显示 ${Math.round(hotMarket.ageMs / 1000)} 秒前缓存` : "",
+    xueqiu.warning ? `雪球热股榜暂不可用：${xueqiu.warning}` : ""
+  ].filter(Boolean).join("；");
   return {
     timestamp: new Date().toLocaleString("zh-CN", { hour12: false, timeZoneName: "short" }),
-    source: hotMarket.cacheStatus === "disk" ? "同花顺问财 OpenAPI · 个股热度排名 · disk cache" : hotMarket.cacheStatus === "stale" ? "同花顺问财 OpenAPI · 个股热度排名 · cached fallback" : "同花顺问财 OpenAPI · 个股热度排名",
-    warning: hotMarket.cacheStatus === "stale" || hotMarket.cacheStatus === "disk" ? `热度榜连接中断，已显示 ${Math.round(hotMarket.ageMs / 1000)} 秒前缓存` : "",
+    source: xueqiu.enabled ? `${sourceBase} + 雪球热股榜` : sourceBase,
+    warning,
     period,
     stats,
     rows
@@ -1023,11 +1326,11 @@ async function hotLeaderDetail(url) {
   if (!row) throw new Error("Stock not found in hot list");
   return {
     timestamp: new Date().toLocaleString("zh-CN", { hour12: false, timeZoneName: "short" }),
-    source: "同花顺问财 OpenAPI · 个股热度排名",
+    source: "同花顺问财 OpenAPI · 个股热度排名 + 雪球热股榜",
     period,
     row,
     detail: {
-      heat: `热度第${row.heatRank}，热度值${Number.isFinite(row.heatValue) ? row.heatValue.toFixed(0) : "待确认"}，${row.rankChange === null ? "热度变化待确认" : row.rankChange >= 0 ? `排名上升${row.rankChange}` : `排名回落${Math.abs(row.rankChange)}`}`,
+      heat: `同花顺第${row.heatRank}，热度值${Number.isFinite(row.heatValue) ? row.heatValue.toFixed(0) : "待确认"}；雪球${Number.isFinite(row.xueqiuRank) ? `第${row.xueqiuRank}，热度${Number.isFinite(row.xueqiuHeatValue) ? row.xueqiuHeatValue.toFixed(0) : "待确认"}，变化${rankChangeLabel(row.xueqiuRankChange)}` : "未上榜"}；${row.rankChange === null ? "同花顺热度变化待确认" : row.rankChange >= 0 ? `同花顺排名上升${row.rankChange}` : `同花顺排名回落${Math.abs(row.rankChange)}`}`,
       flow: `主力${moneyShort(row.mainInflow)}，超大单${moneyShort(row.superInflow)}，大单${moneyShort(row.largeInflow)}`,
       sector: `${row.sectorName}，热度榜内${row.sectorHotCount}只同步上榜，板块均涨幅${pctShort(row.sectorAvgChange)}`,
       leader: `${row.leaderType}，板块内成交额排名${row.sectorAmountRank || "待确认"}，涨幅排名${row.sectorChangeRank || "待确认"}`,
@@ -1624,29 +1927,158 @@ function requestHithinkHotPayload() {
     if (!result.datas.length) {
       throw new Error("同花顺问财热度榜未返回股票列表");
     }
-    return {
-      rows: result.datas,
+    return mergeXueqiuHotPayload(result.datas).then((merged) => ({
+      rows: merged.rows,
       query: HITHINK_HOT_QUERY,
-      total: result.code_count || result.datas.length
+      total: result.code_count || result.datas.length,
+      xueqiu: merged.xueqiu
+    }));
+  });
+}
+
+async function mergeXueqiuHotPayload(hithinkRows) {
+  if (!XUEQIU_HOT_ENABLED) {
+    return {
+      rows: hithinkRows,
+      xueqiu: { enabled: false, rows: 0, matched: 0, warning: "雪球热股榜已关闭" }
     };
+  }
+  try {
+    const xueqiuRows = await requestXueqiuHotPayload();
+    const merged = mergeXueqiuHotRows(hithinkRows, xueqiuRows);
+    return {
+      rows: merged.rows,
+      xueqiu: {
+        enabled: true,
+        rows: merged.total,
+        matched: merged.matched,
+        type: XUEQIU_HOT_TYPE,
+        source: "雪球热股榜",
+        warning: ""
+      }
+    };
+  } catch (error) {
+    return {
+      rows: hithinkRows,
+      xueqiu: {
+        enabled: true,
+        rows: 0,
+        matched: 0,
+        type: XUEQIU_HOT_TYPE,
+        source: "雪球热股榜",
+        warning: compactError(error.message)
+      }
+    };
+  }
+}
+
+async function requestXueqiuHotPayload() {
+  const cookie = await getXueqiuCookie();
+  const payload = await requestJsonWithHeaders(XUEQIU_HOT_URL, {
+    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    accept: "application/json,text/plain,*/*",
+    referer: "https://xueqiu.com/hot/stock",
+    origin: "https://xueqiu.com",
+    cookie
+  }, "Xueqiu");
+  const list = payload?.data?.list;
+  if (!Array.isArray(list) || !list.length) {
+    throw new Error(payload?.error_description || "雪球热股榜未返回列表");
+  }
+  return list
+    .map((item, index) => normalizeXueqiuHotRow(item, index + 1))
+    .filter(Boolean);
+}
+
+function normalizeXueqiuHotRow(item, fallbackRank) {
+  const code = String(item.code || item.symbol || "").match(/(\d{6})/)?.[1] || "";
+  if (!code) return null;
+  return {
+    code,
+    symbol: String(item.symbol || ""),
+    name: String(item.name || ""),
+    rank: fallbackRank,
+    heatValue: asMarketNumber(item.value),
+    rankChange: asMarketNumber(item.rank_change),
+    followers: asMarketNumber(item.followers),
+    percent: asMarketNumber(item.percent),
+    amount: asMarketNumber(item.amount)
+  };
+}
+
+async function getXueqiuCookie() {
+  if (xueqiuSession.cookie && Date.now() - xueqiuSession.fetchedAt < 2 * 60 * 60_000) {
+    return xueqiuSession.cookie;
+  }
+  const response = await requestTextWithHeaders("https://xueqiu.com/hot/stock", {
+    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    referer: "https://xueqiu.com/",
+    connection: "close"
+  }, "Xueqiu");
+  const cookie = cookieFromSetCookie(response.headers["set-cookie"]);
+  if (!cookie) throw new Error("雪球 Cookie 初始化失败");
+  xueqiuSession.cookie = cookie;
+  xueqiuSession.fetchedAt = Date.now();
+  return cookie;
+}
+
+function cookieFromSetCookie(setCookie) {
+  const items = Array.isArray(setCookie) ? setCookie : [];
+  return items
+    .map((item) => String(item).split(";")[0])
+    .filter(Boolean)
+    .join("; ");
+}
+
+async function requestJsonWithHeaders(targetUrl, headers, label) {
+  const response = await requestTextWithHeaders(targetUrl, headers, label);
+  try {
+    return JSON.parse(response.body);
+  } catch (error) {
+    throw new Error(`${label} JSON parse failed: ${error.message}`);
+  }
+}
+
+function requestTextWithHeaders(targetUrl, headers, label) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(targetUrl, { headers, timeout: 8_000 }, (res) => {
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => {
+        body += chunk;
+      });
+      res.on("end", () => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          reject(new Error(`${label} request failed: ${res.statusCode}`));
+          return;
+        }
+        resolve({ body, headers: res.headers, statusCode: res.statusCode });
+      });
+    });
+    req.on("timeout", () => req.destroy(new Error(`${label} request timeout`)));
+    req.on("error", reject);
   });
 }
 
 function queryHithinkCli(query, limit, timeoutSeconds) {
+  const cliArgs = [
+    "--query",
+    query,
+    "--page",
+    "1",
+    "--limit",
+    String(limit),
+    "--timeout",
+    String(timeoutSeconds)
+  ];
+  const usePython = HITHINK_ASTOCK_CLI.endsWith(".py");
+  const command = usePython ? "python3" : HITHINK_ASTOCK_CLI;
+  const args = usePython ? [HITHINK_ASTOCK_CLI, ...cliArgs] : cliArgs;
   return new Promise((resolve, reject) => {
     execFile(
-      "python3",
-      [
-        HITHINK_ASTOCK_CLI,
-        "--query",
-        query,
-        "--page",
-        "1",
-        "--limit",
-        String(limit),
-        "--timeout",
-        String(timeoutSeconds)
-      ],
+      command,
+      args,
       { timeout: 45_000, maxBuffer: 80 * 1024 * 1024 },
       (error, stdout, stderr) => {
         if (error) {
@@ -1852,6 +2284,14 @@ const server = http.createServer(async (req, res) => {
     }
     return;
   }
+  if (url.pathname === "/api/breakout-alerts") {
+    try {
+      sendJson(res, 200, await breakoutAlerts(url));
+    } catch (error) {
+      sendJson(res, 500, { error: error.message });
+    }
+    return;
+  }
   serveStatic(req, res, url);
 });
 
@@ -1872,6 +2312,13 @@ module.exports = {
   keepHotStock,
   enrichHotLeaders,
   limitHotLeaderRows,
+  mergeXueqiuHotRows,
+  normalizeXueqiuHotRow,
+  makeBreakoutAlertRows,
+  enrichBreakoutAlert,
+  scoreBreakoutVolume,
+  scoreBreakoutHeat,
+  scoreBreakoutFlow,
   scoreHeat,
   attachOneDayFlows,
   extractNewsItems,

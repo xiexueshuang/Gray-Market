@@ -365,7 +365,11 @@ output {
 }
 
 .hot-table {
-  min-width: 1980px;
+  min-width: 2240px;
+}
+
+.breakout-table {
+  min-width: 1900px;
 }
 
 .sector-row,
@@ -611,20 +615,38 @@ td:nth-child(13) {
 
 .hot-table th:nth-child(4),
 .hot-table td:nth-child(4),
-.hot-table th:nth-child(14),
-.hot-table td:nth-child(14),
-.hot-table th:nth-child(15),
-.hot-table td:nth-child(15),
 .hot-table th:nth-child(17),
 .hot-table td:nth-child(17),
 .hot-table th:nth-child(18),
 .hot-table td:nth-child(18),
-.hot-table th:nth-child(19),
-.hot-table td:nth-child(19),
 .hot-table th:nth-child(20),
 .hot-table td:nth-child(20),
 .hot-table th:nth-child(21),
-.hot-table td:nth-child(21) {
+.hot-table td:nth-child(21),
+.hot-table th:nth-child(22),
+.hot-table td:nth-child(22),
+.hot-table th:nth-child(23),
+.hot-table td:nth-child(23),
+.hot-table th:nth-child(24),
+.hot-table td:nth-child(24) {
+  text-align: left;
+}
+
+.hot-table th:nth-child(12),
+.hot-table td:nth-child(12),
+.hot-table th:nth-child(13),
+.hot-table td:nth-child(13) {
+  text-align: right;
+}
+
+.breakout-table th:nth-child(4),
+.breakout-table td:nth-child(4),
+.breakout-table th:nth-child(18),
+.breakout-table td:nth-child(18),
+.breakout-table th:nth-child(19),
+.breakout-table td:nth-child(19),
+.breakout-table th:nth-child(20),
+.breakout-table td:nth-child(20) {
   text-align: left;
 }
 

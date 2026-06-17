@@ -16,7 +16,11 @@ const state = {
   hotSortKey: "totalScore",
   hotSortDir: "desc",
   hotPeriod: 1,
-  selectedHotCode: ""
+  selectedHotCode: "",
+  breakoutRows: [],
+  filteredBreakoutRows: [],
+  breakoutSortKey: "breakoutScore",
+  breakoutSortDir: "desc"
 };
 
 const API_BASE = window.location.protocol === "file:" ? "http://localhost:4173" : "";
@@ -51,6 +55,7 @@ const els = {
   trackerView: document.querySelector("#trackerView"),
   sectorView: document.querySelector("#sectorView"),
   hotView: document.querySelector("#hotView"),
+  breakoutView: document.querySelector("#breakoutView"),
   sectorTimestamp: document.querySelector("#sectorTimestamp"),
   sectorSourceBadge: document.querySelector("#sectorSourceBadge"),
   sectorCount: document.querySelector("#sectorCount"),
@@ -82,6 +87,16 @@ const els = {
   hotDetailMeta: document.querySelector("#hotDetailMeta"),
   hotDetailBadge: document.querySelector("#hotDetailBadge"),
   hotDetailCards: document.querySelector("#hotDetailCards"),
+  breakoutTimestamp: document.querySelector("#breakoutTimestamp"),
+  breakoutSourceBadge: document.querySelector("#breakoutSourceBadge"),
+  breakoutCount: document.querySelector("#breakoutCount"),
+  breakoutStrongCount: document.querySelector("#breakoutStrongCount"),
+  breakoutPositiveFlow: document.querySelector("#breakoutPositiveFlow"),
+  breakoutAvgScore: document.querySelector("#breakoutAvgScore"),
+  breakoutFocusList: document.querySelector("#breakoutFocusList"),
+  breakoutRowsBody: document.querySelector("#breakoutRowsBody"),
+  breakoutSearchInput: document.querySelector("#breakoutSearchInput"),
+  breakoutState: document.querySelector("#breakoutState"),
   toast: document.querySelector("#toast")
 };
 
@@ -162,6 +177,10 @@ async function refresh() {
     await refreshHotLeaders();
     return;
   }
+  if (state.view === "breakout") {
+    await refreshBreakouts();
+    return;
+  }
   updateOutputs();
   els.refreshBtn.disabled = true;
   els.refreshBtn.textContent = "刷新中";
@@ -240,6 +259,32 @@ async function refreshSectors() {
   }
 }
 
+async function refreshBreakouts() {
+  els.refreshBtn.disabled = true;
+  els.refreshBtn.textContent = "刷新中";
+  els.breakoutState.textContent = "起爆预警数据加载中";
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 45_000);
+  try {
+    const response = await fetch(`${API_BASE}/api/breakout-alerts?limit=50`, {
+      cache: "no-store",
+      signal: controller.signal
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "请求失败");
+    state.breakoutRows = payload.rows;
+    renderBreakouts(payload);
+    showToast(payload.warning || "起爆预警已更新");
+  } catch (error) {
+    els.breakoutState.textContent = error.name === "AbortError" ? "起爆预警请求超时" : error.message;
+    showToast(els.breakoutState.textContent);
+  } finally {
+    window.clearTimeout(timeoutId);
+    els.refreshBtn.disabled = false;
+    els.refreshBtn.textContent = "↻ 刷新";
+  }
+}
+
 function render(payload) {
   els.candidateCount.textContent = payload.stats.total;
   els.totalMain.textContent = money(payload.stats.totalMainInflow);
@@ -282,6 +327,87 @@ function renderHotLeaders(payload) {
   els.hotState.textContent = state.filteredHotRows.length ? "" : "当前热度榜没有符合条件的龙头候选";
 }
 
+function renderBreakouts(payload) {
+  els.breakoutCount.textContent = payload.stats.total;
+  els.breakoutStrongCount.textContent = payload.stats.strong;
+  els.breakoutPositiveFlow.textContent = payload.stats.positiveFlow;
+  els.breakoutAvgScore.textContent = fixed(payload.stats.avgScore, 1);
+  els.breakoutTimestamp.textContent = payload.warning ? `数据时间：${payload.timestamp} · ${payload.warning}` : `数据时间：${payload.timestamp}`;
+  els.breakoutSourceBadge.textContent = payload.source;
+  applyBreakoutSearchAndSort();
+  renderBreakoutFocus();
+  renderBreakoutTable();
+  els.breakoutState.textContent = state.filteredBreakoutRows.length ? "" : "当前没有符合条件的起爆预警";
+}
+
+function applyBreakoutSearchAndSort() {
+  const keyword = els.breakoutSearchInput.value.trim().toLowerCase();
+  state.filteredBreakoutRows = state.breakoutRows.filter((row) => {
+    return row.name.toLowerCase().includes(keyword) || codeOf(row).toLowerCase().includes(keyword) || row.sectorName.toLowerCase().includes(keyword);
+  });
+  state.filteredBreakoutRows.sort((a, b) => {
+    const av = a[state.breakoutSortKey];
+    const bv = b[state.breakoutSortKey];
+    const result = typeof av === "number" && typeof bv === "number"
+      ? av - bv
+      : String(av).localeCompare(String(bv), "zh-CN");
+    return state.breakoutSortDir === "asc" ? result : -result;
+  });
+}
+
+function renderBreakoutFocus() {
+  const rows = state.filteredBreakoutRows.slice(0, 3);
+  els.breakoutFocusList.innerHTML = rows.map((row) => `
+    <article class="focus-item breakout-card">
+      <div class="focus-title">
+        <div>
+          <div class="stock-code">${codeOf(row)} · ${row.sectorName}</div>
+          <div class="stock-name">${row.name}</div>
+        </div>
+        <span class="score">${fixed(row.breakoutScore, 1)}</span>
+      </div>
+      <div class="focus-grid">
+        <div class="mini"><span>阶段</span><strong>${row.stage}</strong></div>
+        <div class="mini"><span>涨幅</span><strong class="${row.changePct >= 0 ? "up" : "down"}">${pct(row.changePct)}</strong></div>
+        <div class="mini"><span>量比</span><strong>${fixed(row.volumeRatio, 2)}</strong></div>
+      </div>
+      <div class="concept-line">${row.reason}</div>
+      <div class="bars">
+        ${bar("量能", row.volumeScore, Math.min(row.volumeScore / 30, 1) * 100)}
+        ${bar("热度", row.heatScore, Math.min(row.heatScore / 25, 1) * 100)}
+        ${bar("承接", row.flowScore, Math.min(row.flowScore / 25, 1) * 100)}
+      </div>
+    </article>
+  `).join("");
+}
+
+function renderBreakoutTable() {
+  els.breakoutRowsBody.innerHTML = state.filteredBreakoutRows.map((row) => `
+    <tr>
+      <td>${row.rank}</td>
+      <td>${codeOf(row)}</td>
+      <td><strong>${row.name}</strong></td>
+      <td>${row.sectorName}</td>
+      <td><strong>${fixed(row.breakoutScore, 2)}</strong></td>
+      <td><span class="tag ${statusClass(row.stage === "刚起爆" ? "强关注" : row.stage === "升温" ? "观察" : "分化")}">${row.stage}</span></td>
+      <td class="${row.changePct >= 0 ? "up" : "down"}">${pct(row.changePct)}</td>
+      <td>${money(row.amount)}</td>
+      <td>${fixed(row.volumeRatio, 2)}</td>
+      <td class="${row.mainInflow >= 0 ? "up" : "down"}">${money(row.mainInflow)}</td>
+      <td class="${row.superInflow >= 0 ? "up" : "down"}">${money(row.superInflow)}</td>
+      <td>${Number.isFinite(row.heatRank) ? row.heatRank : "待确认"}</td>
+      <td>${Number.isFinite(row.xueqiuRank) ? row.xueqiuRank : "未上榜"}</td>
+      <td>${fixed(row.volumeScore, 1)}</td>
+      <td>${fixed(row.heatScore, 1)}</td>
+      <td>${fixed(row.flowScore, 1)}</td>
+      <td>${fixed(row.sectorScore, 1)}</td>
+      <td>${row.reason}</td>
+      <td>${row.risk}</td>
+      <td>${row.entryCondition}</td>
+    </tr>
+  `).join("");
+}
+
 function applyHotSearchAndSort() {
   const keyword = els.hotSearchInput.value.trim().toLowerCase();
   state.filteredHotRows = state.hotRows.filter((row) => {
@@ -313,7 +439,7 @@ function renderHotFocus() {
         <div class="mini"><span>涨幅</span><strong class="${row.changePct >= 0 ? "up" : "down"}">${pct(row.changePct)}</strong></div>
         <div class="mini"><span>等级</span><strong>${row.grade}</strong></div>
       </div>
-      <div class="concept-line">${row.conceptNote || "题材待确认"}</div>
+      <div class="concept-line">${row.conceptNote || "题材待确认"} · 雪球${Number.isFinite(row.xueqiuRank) ? `第${row.xueqiuRank}` : "未上榜"}</div>
       <div class="bars">
         ${bar("热度", row.heatScore, Math.min(row.heatScore / 35, 1) * 100)}
         ${bar("承接", row.flowScore, Math.min(row.flowScore / 30, 1) * 100)}
@@ -331,6 +457,9 @@ function renderHotTable() {
       <td><strong>${row.name}</strong></td>
       <td>${row.sectorName}</td>
       <td>${row.heatRank}</td>
+      <td>${Number.isFinite(row.xueqiuRank) ? row.xueqiuRank : "未上榜"}</td>
+      <td>${Number.isFinite(row.xueqiuHeatValue) ? fixed(row.xueqiuHeatValue, 0) : "待确认"}</td>
+      <td><span class="rank-change ${rankChangeClass(row.xueqiuRankChange)}">${Number.isFinite(row.xueqiuRankChange) ? rankChangeText(row.xueqiuRankChange) : "待确认"}</span></td>
       <td><span class="rank-change ${rankChangeClass(row.rankChange)}">${rankChangeText(row.rankChange)}${row.rankChangeEstimated ? "估" : ""}</span></td>
       <td class="${row.changePct >= 0 ? "up" : "down"}">${pct(row.changePct)}</td>
       <td>${money(row.amount)}</td>
@@ -691,6 +820,10 @@ function exportCsv() {
     exportHotCsv();
     return;
   }
+  if (state.view === "breakout") {
+    exportBreakoutCsv();
+    return;
+  }
   const header = ["代码", "名称", "分数", "价格", "涨幅", "成交额", "量比", "振幅", "换手", "主力净额", "超大单净额", "超大单占比", "大单净额", "大单占比", "信号", "风险线"];
   const rows = state.filteredRows.map((row) => [
     codeOf(row),
@@ -723,13 +856,16 @@ function exportCsv() {
 }
 
 function exportHotCsv() {
-  const header = ["综合排名", "代码", "名称", "所属板块", "热度排名", "热度变化", "涨幅", "成交额", "量比", "振幅", "换手", "主力净额", "超大单净额", "龙头类型", "炒作概念", "综合评分", "推荐等级", "短线承接理由", "风险收益判断", "风险线", "失效条件"];
+  const header = ["综合排名", "代码", "名称", "所属板块", "同花顺热度排名", "雪球排名", "雪球热度", "雪球变化", "同花顺热度变化", "涨幅", "成交额", "量比", "振幅", "换手", "主力净额", "超大单净额", "龙头类型", "炒作概念", "综合评分", "推荐等级", "短线承接理由", "风险收益判断", "风险线", "失效条件"];
   const rows = state.filteredHotRows.slice(0, 50).map((row) => [
     row.rank,
     codeOf(row),
     row.name,
     row.sectorName,
     row.heatRank,
+    Number.isFinite(row.xueqiuRank) ? row.xueqiuRank : "未上榜",
+    Number.isFinite(row.xueqiuHeatValue) ? row.xueqiuHeatValue : "",
+    Number.isFinite(row.xueqiuRankChange) ? row.xueqiuRankChange : "",
     row.rankChange === null ? "待确认" : row.rankChange,
     row.changePct,
     row.amount,
@@ -759,6 +895,42 @@ function exportHotCsv() {
   URL.revokeObjectURL(url);
 }
 
+function exportBreakoutCsv() {
+  const header = ["排名", "代码", "名称", "所属板块", "起爆评分", "阶段", "涨幅", "成交额", "量比", "主力净额", "超大单净额", "同花顺热度", "雪球排名", "量能分", "热度分", "承接分", "板块分", "触发理由", "风险提示", "买点条件"];
+  const rows = state.filteredBreakoutRows.slice(0, 50).map((row) => [
+    row.rank,
+    codeOf(row),
+    row.name,
+    row.sectorName,
+    row.breakoutScore,
+    row.stage,
+    row.changePct,
+    row.amount,
+    row.volumeRatio,
+    row.mainInflow,
+    row.superInflow,
+    Number.isFinite(row.heatRank) ? row.heatRank : "",
+    Number.isFinite(row.xueqiuRank) ? row.xueqiuRank : "",
+    row.volumeScore,
+    row.heatScore,
+    row.flowScore,
+    row.sectorScore,
+    row.reason,
+    row.risk,
+    row.entryCondition
+  ]);
+  const csv = [header, ...rows]
+    .map((line) => line.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(","))
+    .join("\n");
+  const blob = new Blob([`\ufeff${csv}`], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `a-share-breakout-alerts-${new Date().toISOString().slice(0, 10)}.csv`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 function applyMode(mode) {
   const values = modes[mode];
   Object.entries(values).forEach(([key, value]) => {
@@ -775,11 +947,13 @@ function setView(view) {
   els.trackerView.hidden = view !== "tracker";
   els.sectorView.hidden = view !== "sectors";
   els.hotView.hidden = view !== "hot";
+  els.breakoutView.hidden = view !== "breakout";
   document.querySelectorAll(".view-tab").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.view === view);
   });
   if (view === "sectors" && !state.sectorRows.length) refreshSectors();
   if (view === "hot" && !state.hotRows.length) refreshHotLeaders();
+  if (view === "breakout" && !state.breakoutRows.length) refreshBreakouts();
 }
 
 function setPeriod(period) {
@@ -868,6 +1042,21 @@ document.querySelectorAll("th[data-hot-sort]").forEach((th) => {
   });
 });
 
+document.querySelectorAll("th[data-breakout-sort]").forEach((th) => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.breakoutSort;
+    if (state.breakoutSortKey === key) {
+      state.breakoutSortDir = state.breakoutSortDir === "asc" ? "desc" : "asc";
+    } else {
+      state.breakoutSortKey = key;
+      state.breakoutSortDir = "desc";
+    }
+    applyBreakoutSearchAndSort();
+    renderBreakoutFocus();
+    renderBreakoutTable();
+  });
+});
+
 [els.minAmount, els.minVolumeRatio, els.maxChange, els.maxAmplitude].forEach((input) => {
   input.addEventListener("input", updateOutputs);
   input.addEventListener("change", refresh);
@@ -891,6 +1080,13 @@ els.hotSearchInput.addEventListener("input", () => {
   renderHotFocus();
   renderHotTable();
   els.hotState.textContent = state.filteredHotRows.length ? "" : "没有匹配的热度龙头";
+});
+
+els.breakoutSearchInput.addEventListener("input", () => {
+  applyBreakoutSearchAndSort();
+  renderBreakoutFocus();
+  renderBreakoutTable();
+  els.breakoutState.textContent = state.filteredBreakoutRows.length ? "" : "没有匹配的起爆预警";
 });
 
 els.sectorFocusList.addEventListener("click", (event) => {

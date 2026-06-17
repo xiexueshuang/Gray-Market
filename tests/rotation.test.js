@@ -12,6 +12,9 @@ const {
   hithinkRowToHotStock,
   keepHotStock,
   limitHotLeaderRows,
+  mergeXueqiuHotRows,
+  normalizeXueqiuHotRow,
+  makeBreakoutAlertRows,
   normalizeBoard,
   periodMetrics,
   scoreBoard,
@@ -124,6 +127,27 @@ test("maps hithink iwencai rows into quote payload fields", () => {
   assert.equal(mapped.f62, 3_527_764_027);
   assert(mapped.f69 > 5);
   assert(mapped.f75 > 5);
+});
+
+test("maps hithink rows when amount and super order fields are missing", () => {
+  const mapped = hithinkRowToEastmoney({
+    "股票代码": "603986.SH",
+    "股票简称": "兆易创新",
+    "最新价": 586.04,
+    "最新涨跌幅": 10.000751,
+    "量比[20260617]": 1.466,
+    "振幅[20260617]": 12.208124,
+    "换手率[20260617]": 8.497,
+    "主力资金流向[20260617]": 3_052_887_027.36,
+    "dde大单净额[20260617]": 3_097_489_189.8,
+    "资金流出[20260617]": 14_625_301_095.71,
+    "资金流入[20260617]": 16_973_593_429.84
+  });
+  assert.equal(mapped.f12, "603986");
+  assert.equal(mapped.f13, 1);
+  assert(mapped.f6 > 30_000_000_000);
+  assert(mapped.f66 > 1_000_000_000);
+  assert(mapped.f69 > 3);
 });
 
 test("filters north exchange, star market, and ST rows from hot leaders", () => {
@@ -258,6 +282,95 @@ test("hot concept note uses iwencai concepts and fallback concepts", () => {
   });
   assert(fallback.concepts.length > 0);
   assert.equal(fallback.conceptSource, "本地映射");
+});
+
+test("hot leaders attach xueqiu heat ranking as reference", () => {
+  const hithinkRows = [{
+    "股票代码": "000725.SZ",
+    "股票简称": "京东方A",
+    "个股热度排名[20260616]": 6,
+    "成交额[20260616]": 900_000_000,
+    "量比[20260616]": 1.5,
+    "振幅[20260616]": 5,
+    "换手率[20260616]": 2,
+    "主力资金流向[20260616]": 80_000_000,
+    "特大单净买入额[20260616]": 30_000_000,
+    "dde大单净额[20260616]": 20_000_000
+  }];
+  const xueqiuRows = [normalizeXueqiuHotRow({
+    symbol: "SZ000725",
+    code: "000725",
+    name: "京东方A",
+    value: 8943,
+    rank_change: 3,
+    followers: 500000
+  }, 4)];
+  const merged = mergeXueqiuHotRows(hithinkRows, xueqiuRows);
+  const ranked = enrichHotLeaders(merged.rows, 1, { snapshots: [] })[0];
+  assert.equal(merged.matched, 1);
+  assert.equal(ranked.xueqiuRank, 4);
+  assert.equal(ranked.xueqiuHeatValue, 8943);
+  assert(ranked.carryReason.includes("雪球第4"));
+});
+
+test("xueqiu heat contributes to hot leader score", () => {
+  const rows = [
+    {
+      "股票代码": "000725.SZ",
+      "股票简称": "京东方A",
+      "个股热度排名[20260616]": 8,
+      "成交额[20260616]": 900_000_000,
+      "量比[20260616]": 1.5,
+      "振幅[20260616]": 5,
+      "换手率[20260616]": 2,
+      "主力资金流向[20260616]": 80_000_000,
+      "特大单净买入额[20260616]": 30_000_000,
+      "dde大单净额[20260616]": 20_000_000,
+      __xueqiuRank: 3,
+      __xueqiuHeatValue: 9000,
+      __xueqiuRankChange: 5
+    },
+    {
+      "股票代码": "000063.SZ",
+      "股票简称": "中兴通讯",
+      "个股热度排名[20260616]": 8,
+      "成交额[20260616]": 900_000_000,
+      "量比[20260616]": 1.5,
+      "振幅[20260616]": 5,
+      "换手率[20260616]": 2,
+      "主力资金流向[20260616]": 80_000_000,
+      "特大单净买入额[20260616]": 30_000_000,
+      "dde大单净额[20260616]": 20_000_000,
+      __xueqiuRank: 70,
+      __xueqiuHeatValue: 800,
+      __xueqiuRankChange: -5
+    }
+  ];
+  const ranked = enrichHotLeaders(rows, 1, { snapshots: [] });
+  const strong = ranked.find((row) => row.code === "000725");
+  const weak = ranked.find((row) => row.code === "000063");
+  assert(strong.heatScore > weak.heatScore);
+  assert(strong.totalScore > weak.totalScore);
+});
+
+test("breakout alerts prefer early volume and carrying strength", () => {
+  const rawRows = [
+    { f12: "300502", f13: 0, f14: "新易盛", f2: 680, f3: 2.6, f6: 1_800_000_000, f7: 5, f8: 3, f10: 2.8, f62: 220_000_000, f66: 120_000_000, f69: 6, f72: 70_000_000, f75: 4 },
+    { f12: "000725", f13: 0, f14: "京东方A", f2: 6, f3: 6.8, f6: 1_800_000_000, f7: 11.5, f8: 9, f10: 1.3, f62: -20_000_000, f66: -10_000_000, f69: -1, f72: -5_000_000, f75: -0.5 },
+    { f12: "688001", f13: 1, f14: "科创测试", f2: 60, f3: 2, f6: 900_000_000, f7: 5, f8: 2, f10: 2.5, f62: 100_000_000, f66: 50_000_000, f69: 5, f72: 20_000_000, f75: 2 }
+  ];
+  const hotRefs = new Map([["300502", {
+    heatRank: 15,
+    rankChange: 8,
+    xueqiuRank: 9,
+    xueqiuHeatValue: 7000,
+    xueqiuRankChange: 5
+  }]]);
+  const rows = makeBreakoutAlertRows(rawRows, hotRefs, 10);
+  assert.equal(rows[0].code, "300502");
+  assert.equal(rows.some((row) => row.code === "688001"), false);
+  assert(rows[0].breakoutScore > 60);
+  assert(rows[0].reason.includes("量比"));
 });
 
 test("hot leaders are capped at fifty rows", () => {

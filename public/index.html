@@ -23,6 +23,7 @@
         <button class="view-tab is-active" type="button" data-view="tracker">暗盘筛选</button>
         <button class="view-tab" type="button" data-view="sectors">板块轮动</button>
         <button class="view-tab" type="button" data-view="hot">热度龙头</button>
+        <button class="view-tab" type="button" data-view="breakout">起爆预警</button>
       </nav>
 
       <div id="trackerView">
@@ -336,6 +337,9 @@
                   <th data-hot-sort="name">名称</th>
                   <th data-hot-sort="sectorName">所属板块</th>
                   <th data-hot-sort="heatRank">热度排名</th>
+                  <th data-hot-sort="xueqiuRank">雪球排名</th>
+                  <th data-hot-sort="xueqiuHeatValue">雪球热度</th>
+                  <th data-hot-sort="xueqiuRankChange">雪球变化</th>
                   <th data-hot-sort="rankChange">热度变化</th>
                   <th data-hot-sort="changePct">涨跌幅</th>
                   <th data-hot-sort="amount">成交额</th>
@@ -359,6 +363,87 @@
           </div>
         </section>
 
+      </div>
+
+      <div id="breakoutView" hidden>
+        <section class="control-band" aria-label="起爆预警参数">
+          <div class="section-head compact">
+            <div>
+              <h2>起爆预警</h2>
+              <p id="breakoutTimestamp">等待刷新</p>
+            </div>
+            <span id="breakoutSourceBadge">量能 + 热度升速 + 资金承接</span>
+          </div>
+        </section>
+
+        <section class="metrics" aria-label="起爆预警统计">
+          <div class="metric">
+            <span>预警数</span>
+            <strong id="breakoutCount">--</strong>
+          </div>
+          <div class="metric">
+            <span>刚起爆</span>
+            <strong id="breakoutStrongCount">--</strong>
+          </div>
+          <div class="metric">
+            <span>资金双正</span>
+            <strong id="breakoutPositiveFlow">--</strong>
+          </div>
+          <div class="metric">
+            <span>平均评分</span>
+            <strong id="breakoutAvgScore">--</strong>
+          </div>
+        </section>
+
+        <section class="focus" aria-label="起爆预警概览">
+          <div class="section-head">
+            <div>
+              <h2>优先预警</h2>
+              <p>涨幅未透支，量能、承接、热度和板块共振提前出现</p>
+            </div>
+            <input id="breakoutSearchInput" type="search" placeholder="搜索代码、名称或板块" aria-label="搜索代码、名称或板块">
+          </div>
+          <div id="breakoutFocusList" class="focus-list"></div>
+          <div id="breakoutState" class="state-line" role="status"></div>
+        </section>
+
+        <section class="table-section" aria-label="起爆预警排行榜">
+          <div class="section-head">
+            <div>
+              <h2>起爆预警排行榜</h2>
+              <p>起爆评分 = 量能异动 + 热度升速 + 资金承接 + 板块共振 - 风险扣分</p>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="breakout-table">
+              <thead>
+                <tr>
+                  <th data-breakout-sort="rank">排名</th>
+                  <th data-breakout-sort="code">代码</th>
+                  <th data-breakout-sort="name">名称</th>
+                  <th data-breakout-sort="sectorName">所属板块</th>
+                  <th data-breakout-sort="breakoutScore">起爆评分</th>
+                  <th data-breakout-sort="stage">阶段</th>
+                  <th data-breakout-sort="changePct">涨跌幅</th>
+                  <th data-breakout-sort="amount">成交额</th>
+                  <th data-breakout-sort="volumeRatio">量比</th>
+                  <th data-breakout-sort="mainInflow">主力净流入</th>
+                  <th data-breakout-sort="superInflow">超大单净流入</th>
+                  <th data-breakout-sort="heatRank">同花顺热度</th>
+                  <th data-breakout-sort="xueqiuRank">雪球排名</th>
+                  <th data-breakout-sort="volumeScore">量能分</th>
+                  <th data-breakout-sort="heatScore">热度分</th>
+                  <th data-breakout-sort="flowScore">承接分</th>
+                  <th data-breakout-sort="sectorScore">板块分</th>
+                  <th>触发理由</th>
+                  <th>风险提示</th>
+                  <th>买点条件</th>
+                </tr>
+              </thead>
+              <tbody id="breakoutRowsBody"></tbody>
+            </table>
+          </div>
+        </section>
       </div>
     </main>
 

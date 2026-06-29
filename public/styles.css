@@ -560,6 +560,82 @@ output {
   margin-bottom: 12px;
 }
 
+.driver-logic-panel {
+  border: 1px solid #d6e2fb;
+  border-radius: var(--radius);
+  background: #f7faff;
+  padding: 14px;
+  margin-bottom: 12px;
+}
+
+.driver-logic-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid #d6e2fb;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+}
+
+.driver-logic-title h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.driver-logic-title strong {
+  color: #214f9c;
+  font-size: 15px;
+  text-align: right;
+}
+
+.driver-logic-panel ul {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.driver-logic-panel li {
+  display: grid;
+  gap: 4px;
+  border-left: 3px solid #7aa2e8;
+  padding-left: 10px;
+}
+
+.driver-logic-panel li strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.driver-logic-panel li span {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.investment-meaning {
+  border-top: 1px dashed #c4d4f4;
+  margin-top: 12px;
+  padding-top: 10px;
+}
+
+.investment-meaning span {
+  display: block;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 800;
+  margin-bottom: 4px;
+}
+
+.investment-meaning p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
 .interpretation-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(170px, 1fr));
@@ -1202,6 +1278,15 @@ tbody tr:hover {
   .interpretation-source {
     justify-items: start;
     white-space: normal;
+  }
+
+  .driver-logic-title {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .driver-logic-title strong {
+    text-align: left;
   }
 
   .modal-backdrop {

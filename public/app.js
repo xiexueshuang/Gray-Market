@@ -1095,6 +1095,7 @@ function renderSectorInterpretationCard(model) {
   const watchSignals = renderInterpretationList(model.watchSignals);
   const risks = renderInterpretationList(model.risks);
   const modelLabel = String(model.source || "").includes("本地规则") ? "规则解读" : "问财模型解读";
+  const driverLogic = renderDriverLogic(model.driverLogic);
   const beneficiaries = (model.beneficiaries || []).slice(0, 8).map((item) => `
     <li>
       <strong>${escapeHtml(item.name || "待确认")}</strong>
@@ -1116,6 +1117,7 @@ function renderSectorInterpretationCard(model) {
         </div>
       </div>
       ${warning}
+      ${driverLogic}
       <div class="interpretation-grid">
         <section>
           <h4>为什么涨</h4>
@@ -1140,6 +1142,28 @@ function renderSectorInterpretationCard(model) {
         <ul>${beneficiaries || `<li><strong>待确认</strong><span>暂无明确受益股。</span></li>`}</ul>
       </section>
     </article>
+  `;
+}
+
+function renderDriverLogic(driver = {}) {
+  const points = (driver.points || []).slice(0, 6).map((item) => `
+    <li>
+      <strong>${escapeHtml(item.title || "驱动逻辑")}</strong>
+      <span>${escapeHtml(item.text || "驱动依据待确认")}</span>
+    </li>
+  `).join("");
+  return `
+    <section class="driver-logic-panel">
+      <div class="driver-logic-title">
+        <h4>驱动逻辑</h4>
+        <strong>${escapeHtml(driver.summary || "事件催化 + 资金承接")}</strong>
+      </div>
+      <ul>${points || `<li><strong>待确认</strong><span>等待问财模型补充驱动依据。</span></li>`}</ul>
+      <div class="investment-meaning">
+        <span>投资含义</span>
+        <p>${escapeHtml(driver.investmentMeaning || "短线看资金和核心股承接，中线看产业趋势和业绩验证。")}</p>
+      </div>
+    </section>
   `;
 }
 

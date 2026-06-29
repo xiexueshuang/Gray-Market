@@ -667,6 +667,9 @@ test("sector interpretation explains rise beneficiaries continuity and risks", (
   };
   const fallback = buildRuleSectorInterpretation(board, stocks, news);
   assert.match(fallback.coreConclusion, /半导体设备/);
+  assert.match(fallback.driverLogic.summary, /资金回流/);
+  assert(fallback.driverLogic.points.length >= 3);
+  assert.match(fallback.driverLogic.investmentMeaning, /弹性行情/);
   assert(fallback.whyRise.length >= 3);
   assert.equal(fallback.beneficiaries[0].name, "测试龙头(000001)");
   assert.match(fallback.continuity.text, /持续性/);
@@ -675,6 +678,11 @@ test("sector interpretation explains rise beneficiaries continuity and risks", (
   const normalized = normalizeSectorInterpretation({
     headline: "模型标题",
     coreConclusion: "模型结论",
+    driverLogic: {
+      summary: "政策催化 + 资金回流",
+      points: [{ title: "政策催化", text: "医保目录预期升温" }],
+      investmentMeaning: "短线看资金，中线看兑现"
+    },
     whyRise: ["订单催化", "资金回流"],
     beneficiaries: [{ name: "测试龙头", reason: "设备订单改善" }],
     continuity: { level: "较强", text: "资金和订单共振" },
@@ -682,8 +690,20 @@ test("sector interpretation explains rise beneficiaries continuity and risks", (
     risks: ["高位分化"]
   }, fallback, { source: "同花顺问财模型" });
   assert.equal(normalized.headline, "模型标题");
+  assert.equal(normalized.driverLogic.summary, "政策催化 + 资金回流");
+  assert.match(normalized.driverLogic.points[0].text, /医保目录/);
+  assert.match(normalized.driverLogic.investmentMeaning, /短线/);
   assert.equal(normalized.continuity.level, "较强");
   assert.match(normalized.beneficiaries[0].reason, /订单/);
+
+  const medical = buildRuleSectorInterpretation({
+    ...board,
+    name: "医药医疗",
+    status: "强势"
+  }, stocks, { items: [] });
+  assert.match(medical.driverLogic.summary, /政策催化/);
+  assert.match(medical.driverLogic.points[0].title, /医保|创新药/);
+  assert.match(medical.driverLogic.investmentMeaning, /医保准入预期/);
 });
 
 test("hot leader detail uses modal and keeps type guide visible", () => {
@@ -738,11 +758,15 @@ test("breakout alerts expose configurable sound and popup controls", () => {
   assert.match(html, /热点事件解读/);
   assert.match(app, /function renderSectorInterpretationCard/);
   assert.match(app, /问财模型解读/);
+  assert.match(app, /function renderDriverLogic/);
+  assert.match(app, /驱动逻辑/);
+  assert.match(app, /投资含义/);
   assert.match(app, /为什么涨/);
   assert.match(app, /受益股票/);
   assert.match(app, /持续性/);
   assert.match(app, /风险点/);
   assert.match(css, /sector-interpretation-card/);
+  assert.match(css, /driver-logic-panel/);
   assert.match(css, /interpretation-grid/);
   assert.match(app, /AI股票分析/);
   assert.match(app, /大单成本区/);

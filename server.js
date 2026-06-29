@@ -2248,7 +2248,7 @@ async function getSectorNews(board, stocks = []) {
 }
 
 async function getSectorInterpretation(board, stocks = [], news = {}) {
-  const cacheName = `sector-interpretation-week-${safeCacheName(board.name)}`;
+  const cacheName = `sector-interpretation-v4-week-${safeCacheName(board.name)}`;
   const disk = readDiskCache(cacheName, NEWS_CACHE_MS);
   if (disk) return disk.payload;
   const fallback = buildRuleSectorInterpretation(board, stocks, news);
@@ -2288,7 +2288,8 @@ function buildSectorInterpretationPrompt(board, stocks = [], news = {}) {
     `请用A股短线复盘视角，生成「${board.name}」板块热点事件解读。`,
     "要求解释：板块为什么涨、哪些股票受益、持续性如何、后续观察信号和风险。",
     "请只输出JSON，不要输出Markdown。",
-    "JSON字段：headline, coreConclusion, whyRise数组, beneficiaries数组{name, reason}, continuity对象{level,text}, watchSignals数组, risks数组。",
+    "JSON字段：headline, coreConclusion, driverLogic对象{summary, points数组{title,text}, investmentMeaning}, whyRise数组, beneficiaries数组{name, reason}, continuity对象{level,text}, watchSignals数组, risks数组。",
+    "driverLogic.summary 用「政策催化 + 估值修复 + 资金回流」这类短语概括；driverLogic.points 写清每条驱动的事件、数据、资金或产业链依据；driverLogic.investmentMeaning 写短线和中线含义。",
     `板块数据：状态${board.status}，今日涨跌幅${pctShort(board.changePct)}，成交额${moneyShort(board.amount)}，成交额变化${pctShort(board.amountChangePct)}，主力净流入估算${moneyShort(board.mainInflow)}，超大单净流入估算${moneyShort(board.superInflow)}，上涨家数占比${pctShort((board.upRatio || 0) * 100)}，量比均值${Number.isFinite(board.volumeRatio) ? board.volumeRatio.toFixed(2) : "待确认"}，轮动评分${Number.isFinite(board.rotationScore) ? board.rotationScore.toFixed(1) : "待确认"}。`,
     `强势股：\n${leaders || "暂无强势股数据"}`,
     `最近一周事件：\n${events || "暂无明确事件，结合资金和强势股生成判断"}`
@@ -2302,11 +2303,13 @@ function buildRuleSectorInterpretation(board, stocks = [], news = {}) {
   const flowText = `主力净流入估算${moneyShort(board.mainInflow)}，超大单净流入估算${moneyShort(board.superInflow)}`;
   const breadthText = `上涨家数占比${pctShort((board.upRatio || 0) * 100)}，量比均值${Number.isFinite(board.volumeRatio) ? board.volumeRatio.toFixed(2) : "待确认"}`;
   const continuity = sectorContinuity(board);
+  const driverLogic = buildSectorDriverLogic(board, leaders, validEvents, flowText, breadthText, eventText);
   return {
     source: "本地规则解读",
     generatedAt: new Date().toLocaleString("zh-CN", { hour12: false, timeZoneName: "short" }),
     headline: `${board.name}热点解读：${board.status}，${flowText}`,
     coreConclusion: `${board.name}当前处于${board.status}状态，今日涨幅${pctShort(board.changePct)}，成交额${moneyShort(board.amount)}，成交额变化${pctShort(board.amountChangePct)}。${eventText}，短线重点看核心股承接和资金连续性。`,
+    driverLogic,
     whyRise: [
       `${flowText}，资金承接是板块轮动评分的重要支撑。`,
       `${breadthText}，板块内部扩散程度决定行情持续性。`,
@@ -2330,6 +2333,83 @@ function buildRuleSectorInterpretation(board, stocks = [], news = {}) {
     })),
     rawText: ""
   };
+}
+
+function buildSectorDriverLogic(board, leaders = [], events = [], flowText = "", breadthText = "", eventText = "") {
+  const text = `${board.name} ${events.map((item) => `${item.title} ${item.summary}`).join(" ")}`;
+  const tags = [];
+  if (/医药|医疗|创新药|CRO|减肥药|重组蛋白/.test(text)) tags.push("政策催化");
+  if (/政策|医保|目录|商保|创新药|会议|规划|补贴|监管/.test(text)) tags.push("政策催化");
+  if (/涨价|提价|供需|订单|中标|合同|产能|扩产/.test(text)) tags.push("产业催化");
+  if (/业绩|预增|利润|营收|财报/.test(text)) tags.push("业绩催化");
+  if (/医药|消费|证券|地产|白酒|金融|保险/.test(text) || (board.status === "强势" && (board.changePct || 0) > 0)) tags.push("估值修复");
+  if ((board.mainInflow || 0) > 0 || (board.superInflow || 0) > 0) tags.push("资金回流");
+  if ((board.upRatio || 0) >= 0.6 || leaders.length >= 3) tags.push("细分扩散");
+  const summary = [...new Set(tags)].slice(0, 4).join(" + ") || "事件催化 + 资金承接 + 板块扩散";
+  const primaryEvent = relevantSectorEvent(board, events);
+  const points = [];
+  points.push({
+    title: driverEventTitle(board, primaryEvent),
+    text: primaryEvent
+      ? `${primaryEvent.publishTime || "近期"}，${primaryEvent.title}。${primaryEvent.summary || "事件催化提升市场关注度"}，板块热度获得事件侧支撑。`
+      : /医药|医疗|创新药|CRO/.test(board.name)
+        ? "医保目录、商保创新药目录、创新药审评等政策预期提升市场关注度，资金更容易向创新药产业链扩散。"
+      : `${eventText}，当前驱动更多来自资金和价格行为验证。`
+  });
+  points.push({
+    title: `${board.name}细分扩散`,
+    text: leaders.length
+      ? `${leaders.slice(0, 4).map((row) => row.name).join("、")}等核心股同步走强，${breadthText}，说明资金在板块内部扩散。`
+      : `${breadthText}，继续观察强势成分股数量能否增加。`
+  });
+  points.push({
+    title: "资金面配合",
+    text: `${flowText}，成交额${moneyShort(board.amount)}，成交额变化${pctShort(board.amountChangePct)}，行业资金偏好正在强化。`
+  });
+  return {
+    summary,
+    points,
+    investmentMeaning: sectorInvestmentMeaning(board, summary)
+  };
+}
+
+function relevantSectorEvent(board, events = []) {
+  const boardText = String(board.name || "");
+  const keywords = sectorEventKeywords(boardText);
+  return events.find((item) => {
+    const text = `${item.title || ""} ${item.summary || ""}`;
+    return keywords.some((keyword) => text.includes(keyword));
+  }) || null;
+}
+
+function sectorEventKeywords(boardName) {
+  if (/医药|医疗|创新药|CRO/.test(boardName)) return ["医药", "医疗", "创新药", "医保", "商保", "药品", "CRO", "减肥药", "重组蛋白"];
+  if (/半导体|芯片|电子/.test(boardName)) return ["半导体", "芯片", "晶圆", "封装", "存储", "国产替代"];
+  if (/机器人/.test(boardName)) return ["机器人", "减速器", "执行器", "工业母机"];
+  if (/证券|金融/.test(boardName)) return ["证券", "券商", "金融", "资本市场"];
+  if (/消费|白酒|食品/.test(boardName)) return ["消费", "白酒", "食品", "饮料"];
+  const compact = boardName.replace(/板块|行业|概念/g, "");
+  return compact ? [compact, ...compact.split(/[、/]/).filter((part) => part.length >= 2)] : [];
+}
+
+function driverEventTitle(board, event) {
+  const text = `${board.name} ${event?.title || ""} ${event?.summary || ""}`;
+  if (/医保|目录|商保/.test(text)) return "医保目录调整催化";
+  if (/医药|医疗|创新药|CRO/.test(text)) return "医保/创新药政策预期催化";
+  if (/政策|规划|补贴|会议/.test(text)) return "政策预期催化";
+  if (/订单|中标|合同/.test(text)) return "订单验证催化";
+  if (/涨价|提价|供需/.test(text)) return "供需涨价催化";
+  if (/业绩|预增|利润|营收/.test(text)) return "业绩兑现催化";
+  return `${board.name}事件催化`;
+}
+
+function sectorInvestmentMeaning(board, summary) {
+  const shortTerm = `${board.name}当前属于“${summary}”驱动的弹性行情，短线看成交额放大、核心股承接和资金集中流入。`;
+  const midTerm = /医药|医疗|创新药|CRO/.test(board.name)
+    ? "中线持续性取决于创新药管线、临床数据、商业化能力、医保准入预期和行业资金连续性，单纯蹭概念的个股持续性偏弱。"
+    : "中线持续性取决于产业趋势兑现、业绩验证和资金连续性，单纯蹭概念的个股持续性偏弱。";
+  if ((board.changePct || 0) > 5) return `${shortTerm} 今日涨幅偏高，后续重点看回踩时能否缩量企稳。${midTerm}`;
+  return `${shortTerm} ${midTerm}`;
 }
 
 function sectorContinuity(board) {
@@ -2361,6 +2441,7 @@ function normalizeSectorInterpretation(value = {}, fallback = {}, meta = {}) {
   const rawText = String(value.rawText || meta.rawText || "").trim();
   const headline = nonEmptyText(value.headline) || fallback.headline;
   const coreConclusion = nonEmptyText(value.coreConclusion || value.conclusion || value.summary) || textFromRaw(rawText) || fallback.coreConclusion;
+  const driverLogic = normalizeDriverLogic(value.driverLogic || value.driveLogic || value.drivingLogic || value.logic, fallback.driverLogic);
   const whyRise = normalizeStringList(value.whyRise || value.reasons || value.why || value.upReason, fallback.whyRise);
   const beneficiaries = normalizeBeneficiaries(value.beneficiaries || value.stocks || value.benefitStocks, fallback.beneficiaries);
   const continuity = normalizeContinuity(value.continuity, fallback.continuity);
@@ -2372,6 +2453,7 @@ function normalizeSectorInterpretation(value = {}, fallback = {}, meta = {}) {
     generatedAt: new Date().toLocaleString("zh-CN", { hour12: false, timeZoneName: "short" }),
     headline,
     coreConclusion,
+    driverLogic,
     whyRise,
     beneficiaries,
     continuity,
@@ -2379,6 +2461,42 @@ function normalizeSectorInterpretation(value = {}, fallback = {}, meta = {}) {
     risks,
     rawText
   };
+}
+
+function normalizeDriverLogic(value, fallback = {}) {
+  if (typeof value === "string") {
+    return {
+      summary: value.trim() || fallback.summary || "事件催化 + 资金承接",
+      points: fallback.points || [],
+      investmentMeaning: fallback.investmentMeaning || ""
+    };
+  }
+  if (value && typeof value === "object") {
+    return {
+      summary: nonEmptyText(value.summary || value.title || value.logic) || fallback.summary || "事件催化 + 资金承接",
+      points: normalizeDriverPoints(value.points || value.items || value.details, fallback.points),
+      investmentMeaning: nonEmptyText(value.investmentMeaning || value.meaning || value.investment || value.投资含义) || fallback.investmentMeaning || ""
+    };
+  }
+  return fallback;
+}
+
+function normalizeDriverPoints(value, fallback = []) {
+  const source = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[；;\n]/) : [];
+  const points = source.map((item) => {
+    if (typeof item === "string") {
+      const [title, ...rest] = item.split(/[:：]/);
+      return {
+        title: (title || "驱动逻辑").replace(/^[\d.、\-\s]+/, "").trim(),
+        text: (rest.join("：") || item).trim()
+      };
+    }
+    return {
+      title: String(item?.title || item?.name || item?.label || "驱动逻辑").trim(),
+      text: String(item?.text || item?.reason || item?.summary || item?.detail || "").trim()
+    };
+  }).filter((item) => item.title && item.text).slice(0, 6);
+  return points.length ? points : fallback || [];
 }
 
 function normalizeStringList(value, fallback = []) {

@@ -1406,11 +1406,13 @@ async function sectorDetail(url) {
     .sort((a, b) => b.score - a.score)
     .slice(0, 30);
   const news = await getSectorNews(enrichedBoard, rows);
+  const interpretation = await getSectorInterpretation(enrichedBoard, rows, news);
   return {
     timestamp: new Date().toLocaleString("zh-CN", { hour12: false, timeZoneName: "short" }),
     source: boardMarket.source || "Eastmoney board quote API",
     period,
     board: enrichedBoard,
+    interpretation,
     news,
     rows
   };
@@ -2243,6 +2245,276 @@ async function getSectorNews(board, stocks = []) {
       items: [emptyNewsItem()]
     };
   }
+}
+
+async function getSectorInterpretation(board, stocks = [], news = {}) {
+  const cacheName = `sector-interpretation-week-${safeCacheName(board.name)}`;
+  const disk = readDiskCache(cacheName, NEWS_CACHE_MS);
+  if (disk) return disk.payload;
+  const fallback = buildRuleSectorInterpretation(board, stocks, news);
+  const query = buildSectorInterpretationPrompt(board, stocks, news);
+  try {
+    const raw = await requestIwenCaiModelRaw(query);
+    const text = extractIwenCaiAnswerText(raw);
+    if (!text) throw new Error("问财模型未返回可解析文本");
+    const parsed = parseSectorInterpretationJson(text);
+    const payload = normalizeSectorInterpretation(parsed || { rawText: text }, fallback, {
+      source: "同花顺问财模型 · 最近一周热点事件解读",
+      query,
+      rawText: text
+    });
+    writeDiskCache(cacheName, payload);
+    return payload;
+  } catch (error) {
+    return {
+      ...fallback,
+      source: "本地规则解读 · 问财模型待确认",
+      query,
+      warning: compactError(error.message)
+    };
+  }
+}
+
+function buildSectorInterpretationPrompt(board, stocks = [], news = {}) {
+  const leaders = stocks.slice(0, 8).map((row, index) => {
+    return `${index + 1}. ${row.name}(${row.code}) 涨幅${pctShort(row.changePct)} 成交额${moneyShort(row.amount)} 量比${Number.isFinite(row.volumeRatio) ? row.volumeRatio.toFixed(2) : "待确认"} 主力${moneyShort(row.mainInflow)} 超大单${moneyShort(row.superInflow)} DDE${moneyShort(row.ddeNetAmount)}`;
+  }).join("\n");
+  const events = (news.items || [])
+    .filter((item) => item && item.title && item.title !== "暂无明确利好，等待确认")
+    .slice(0, 5)
+    .map((item, index) => `${index + 1}. ${item.title}｜${item.source || "待确认"}｜${item.publishTime || "待确认"}｜${item.summary || ""}`)
+    .join("\n");
+  return [
+    `请用A股短线复盘视角，生成「${board.name}」板块热点事件解读。`,
+    "要求解释：板块为什么涨、哪些股票受益、持续性如何、后续观察信号和风险。",
+    "请只输出JSON，不要输出Markdown。",
+    "JSON字段：headline, coreConclusion, whyRise数组, beneficiaries数组{name, reason}, continuity对象{level,text}, watchSignals数组, risks数组。",
+    `板块数据：状态${board.status}，今日涨跌幅${pctShort(board.changePct)}，成交额${moneyShort(board.amount)}，成交额变化${pctShort(board.amountChangePct)}，主力净流入估算${moneyShort(board.mainInflow)}，超大单净流入估算${moneyShort(board.superInflow)}，上涨家数占比${pctShort((board.upRatio || 0) * 100)}，量比均值${Number.isFinite(board.volumeRatio) ? board.volumeRatio.toFixed(2) : "待确认"}，轮动评分${Number.isFinite(board.rotationScore) ? board.rotationScore.toFixed(1) : "待确认"}。`,
+    `强势股：\n${leaders || "暂无强势股数据"}`,
+    `最近一周事件：\n${events || "暂无明确事件，结合资金和强势股生成判断"}`
+  ].join("\n\n");
+}
+
+function buildRuleSectorInterpretation(board, stocks = [], news = {}) {
+  const validEvents = (news.items || []).filter((item) => item && item.title && item.title !== "暂无明确利好，等待确认");
+  const leaders = stocks.slice(0, 5);
+  const eventText = validEvents[0]?.title ? `最近事件聚焦「${validEvents[0].title}」` : "最近一周暂无明确单一利好，资金和强势股表现是主要观察依据";
+  const flowText = `主力净流入估算${moneyShort(board.mainInflow)}，超大单净流入估算${moneyShort(board.superInflow)}`;
+  const breadthText = `上涨家数占比${pctShort((board.upRatio || 0) * 100)}，量比均值${Number.isFinite(board.volumeRatio) ? board.volumeRatio.toFixed(2) : "待确认"}`;
+  const continuity = sectorContinuity(board);
+  return {
+    source: "本地规则解读",
+    generatedAt: new Date().toLocaleString("zh-CN", { hour12: false, timeZoneName: "short" }),
+    headline: `${board.name}热点解读：${board.status}，${flowText}`,
+    coreConclusion: `${board.name}当前处于${board.status}状态，今日涨幅${pctShort(board.changePct)}，成交额${moneyShort(board.amount)}，成交额变化${pctShort(board.amountChangePct)}。${eventText}，短线重点看核心股承接和资金连续性。`,
+    whyRise: [
+      `${flowText}，资金承接是板块轮动评分的重要支撑。`,
+      `${breadthText}，板块内部扩散程度决定行情持续性。`,
+      `${eventText}。`
+    ],
+    beneficiaries: leaders.length ? leaders.map((row) => ({
+      name: `${row.name}(${row.code})`,
+      reason: `涨幅${pctShort(row.changePct)}，成交额${moneyShort(row.amount)}，主力${moneyShort(row.mainInflow)}，${row.reason || "观察资金承接"}`
+    })) : [{ name: "待确认", reason: "暂无满足成交额门槛的强势成分股。" }],
+    continuity,
+    watchSignals: [
+      `${board.name}成交额继续放大，主力和超大单维持正流入。`,
+      `板块内至少2-3只核心股保持强承接，回落后能收回分时均线。`,
+      `上涨家数占比维持在60%以上，量比均值保持活跃。`
+    ],
+    risks: sectorInterpretationRisks(board, leaders),
+    references: validEvents.slice(0, 3).map((item) => ({
+      title: item.title,
+      source: item.source || "待确认",
+      publishTime: item.publishTime || "待确认"
+    })),
+    rawText: ""
+  };
+}
+
+function sectorContinuity(board) {
+  let score = 0;
+  if (board.status === "强势") score += 2;
+  if (board.status === "升温") score += 1;
+  if ((board.mainInflow || 0) > 0) score += 1;
+  if ((board.superInflow || 0) > 0) score += 1;
+  if ((board.upRatio || 0) >= 0.6) score += 1;
+  if ((board.amountChangePct || 0) > 0) score += 1;
+  const level = score >= 5 ? "较强" : score >= 3 ? "中等" : "偏弱";
+  return {
+    level,
+    text: `${board.name}持续性取决于资金连续净流入、上涨家数扩散和核心股分时承接。当前评分因子为${score}，短线按${level}处理。`
+  };
+}
+
+function sectorInterpretationRisks(board, leaders = []) {
+  const risks = [];
+  if ((board.changePct || 0) > 5) risks.push("板块涨幅较大，日内追高需要等待回踩承接确认。");
+  if ((board.upRatio || 0) < 0.55) risks.push("上涨家数占比不足，板块内部存在分化。");
+  if ((board.mainInflow || 0) < 0 || (board.superInflow || 0) < 0) risks.push("主力或超大单资金转弱，持续性需要重新确认。");
+  if (leaders.some((row) => (row.amplitude || 0) > 10)) risks.push("核心股振幅偏大，短线情绪波动加剧。");
+  if (!risks.length) risks.push("重点防范高开低走、成交额缩量和核心股资金转负。");
+  return risks;
+}
+
+function normalizeSectorInterpretation(value = {}, fallback = {}, meta = {}) {
+  const rawText = String(value.rawText || meta.rawText || "").trim();
+  const headline = nonEmptyText(value.headline) || fallback.headline;
+  const coreConclusion = nonEmptyText(value.coreConclusion || value.conclusion || value.summary) || textFromRaw(rawText) || fallback.coreConclusion;
+  const whyRise = normalizeStringList(value.whyRise || value.reasons || value.why || value.upReason, fallback.whyRise);
+  const beneficiaries = normalizeBeneficiaries(value.beneficiaries || value.stocks || value.benefitStocks, fallback.beneficiaries);
+  const continuity = normalizeContinuity(value.continuity, fallback.continuity);
+  const watchSignals = normalizeStringList(value.watchSignals || value.signals || value.observe, fallback.watchSignals);
+  const risks = normalizeStringList(value.risks || value.risk || value.riskTips, fallback.risks);
+  return {
+    ...fallback,
+    ...meta,
+    generatedAt: new Date().toLocaleString("zh-CN", { hour12: false, timeZoneName: "short" }),
+    headline,
+    coreConclusion,
+    whyRise,
+    beneficiaries,
+    continuity,
+    watchSignals,
+    risks,
+    rawText
+  };
+}
+
+function normalizeStringList(value, fallback = []) {
+  const source = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[；;\n]/) : [];
+  const list = source
+    .map((item) => typeof item === "string" ? item : item?.text || item?.reason || item?.summary || "")
+    .map((item) => String(item || "").replace(/^[\d.、\-\s]+/, "").trim())
+    .filter(Boolean)
+    .slice(0, 6);
+  return list.length ? list : fallback;
+}
+
+function normalizeBeneficiaries(value, fallback = []) {
+  const source = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[；;\n]/) : [];
+  const list = source.map((item) => {
+    if (typeof item === "string") {
+      const [name, ...rest] = item.split(/[:：]/);
+      return { name: (name || "受益股").trim(), reason: (rest.join("：") || item).trim() };
+    }
+    return {
+      name: String(item?.name || item?.stock || item?.股票 || "待确认").trim(),
+      reason: String(item?.reason || item?.logic || item?.原因 || "受益逻辑待确认").trim()
+    };
+  }).filter((item) => item.name && item.reason).slice(0, 8);
+  return list.length ? list : fallback;
+}
+
+function normalizeContinuity(value, fallback = {}) {
+  if (typeof value === "string") return { level: fallback.level || "待确认", text: value.trim() || fallback.text || "" };
+  if (value && typeof value === "object") {
+    return {
+      level: nonEmptyText(value.level || value.grade || value.持续性) || fallback.level || "待确认",
+      text: nonEmptyText(value.text || value.reason || value.summary || value.判断) || fallback.text || ""
+    };
+  }
+  return fallback;
+}
+
+function nonEmptyText(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text || "";
+}
+
+function textFromRaw(rawText) {
+  if (!rawText) return "";
+  return rawText.replace(/```json|```/g, "").replace(/\s+/g, " ").slice(0, 300);
+}
+
+function parseSectorInterpretationJson(text) {
+  const cleaned = String(text || "").replace(/```json|```/g, "").trim();
+  const first = cleaned.indexOf("{");
+  const last = cleaned.lastIndexOf("}");
+  if (first === -1 || last === -1 || last <= first) return null;
+  try {
+    return JSON.parse(cleaned.slice(first, last + 1));
+  } catch {
+    return null;
+  }
+}
+
+function extractIwenCaiAnswerText(raw) {
+  const candidates = [];
+  collectIwenCaiText(raw, candidates, "");
+  const relevant = candidates
+    .map((item) => ({ ...item, text: item.text.replace(/\s+/g, " ").trim() }))
+    .filter((item) => item.text.length >= 40 && /板块|上涨|受益|持续|风险|资金|热点/.test(item.text))
+    .sort((a, b) => b.priority - a.priority || b.text.length - a.text.length);
+  return relevant[0]?.text || "";
+}
+
+function collectIwenCaiText(value, out, key) {
+  if (!value) return;
+  if (typeof value === "string") {
+    const priority = /answer|content|result|text|summary|conclusion|source_original/i.test(key) ? 10 : 0;
+    out.push({ text: value, priority });
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectIwenCaiText(item, out, key));
+    return;
+  }
+  if (typeof value !== "object") return;
+  for (const [childKey, childValue] of Object.entries(value)) {
+    collectIwenCaiText(childValue, out, childKey);
+  }
+}
+
+function requestIwenCaiModelRaw(query) {
+  const apiKey = process.env.IWENCAI_API_KEY || "";
+  if (!apiKey) return Promise.reject(new Error("IWENCAI_API_KEY 未配置"));
+  const body = JSON.stringify({
+    channels: ["news"],
+    app_id: "AIME_SKILL",
+    query
+  });
+  const options = {
+    method: "POST",
+    hostname: "openapi.iwencai.com",
+    path: "/v1/comprehensive/search",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      "Content-Length": Buffer.byteLength(body),
+      "X-Claw-Call-Type": "normal",
+      "X-Claw-Skill-Id": "news-search",
+      "X-Claw-Skill-Version": "1.0.0",
+      "X-Claw-Plugin-Id": "none",
+      "X-Claw-Plugin-Version": "none",
+      "X-Claw-Trace-Id": crypto.randomBytes(32).toString("hex")
+    },
+    timeout: 15_000
+  };
+  return new Promise((resolve, reject) => {
+    const req = https.request(options, (res) => {
+      let response = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => {
+        response += chunk;
+      });
+      res.on("end", () => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          reject(new Error(`问财模型调用失败：${res.statusCode}`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(response));
+        } catch (error) {
+          reject(new Error(`问财模型 JSON 解析失败：${error.message}`));
+        }
+      });
+    });
+    req.on("timeout", () => req.destroy(new Error("问财模型请求超时")));
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
 }
 
 function emptyNewsItem() {
@@ -3102,6 +3374,8 @@ module.exports = {
   scoreStock,
   buildStockChipInsight,
   buildAiStockDiagnosis,
+  buildRuleSectorInterpretation,
+  normalizeSectorInterpretation,
   attachOneDayFlows,
   extractNewsItems,
   buildSyntheticBoardPayload

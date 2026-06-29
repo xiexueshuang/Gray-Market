@@ -29,7 +29,9 @@ const {
   scoreStock,
   attachOneDayFlows,
   buildStockChipInsight,
-  buildAiStockDiagnosis
+  buildAiStockDiagnosis,
+  buildRuleSectorInterpretation,
+  normalizeSectorInterpretation
 } = require("../server.js");
 
 test("normalizes board breadth and money fields", () => {
@@ -633,6 +635,57 @@ test("news extraction handles normal and empty responses", () => {
   assert.equal(extractNewsItems({ data: [] }).length, 0);
 });
 
+test("sector interpretation explains rise beneficiaries continuity and risks", () => {
+  const board = {
+    name: "半导体设备",
+    status: "强势",
+    changePct: 3.2,
+    amount: 88_000_000_000,
+    amountChangePct: 42,
+    mainInflow: 1_200_000_000,
+    superInflow: 620_000_000,
+    upRatio: 0.72,
+    volumeRatio: 1.86
+  };
+  const stocks = [{
+    code: "000001",
+    name: "测试龙头",
+    changePct: 5.2,
+    amount: 3_000_000_000,
+    mainInflow: 300_000_000,
+    superInflow: 120_000_000,
+    ddeNetAmount: 80_000_000,
+    reason: "资金双正"
+  }];
+  const news = {
+    items: [{
+      title: "半导体设备订单增长",
+      source: "同花顺资讯",
+      publishTime: "2026-06-29",
+      summary: "产业链订单改善"
+    }]
+  };
+  const fallback = buildRuleSectorInterpretation(board, stocks, news);
+  assert.match(fallback.coreConclusion, /半导体设备/);
+  assert(fallback.whyRise.length >= 3);
+  assert.equal(fallback.beneficiaries[0].name, "测试龙头(000001)");
+  assert.match(fallback.continuity.text, /持续性/);
+  assert(fallback.risks.length >= 1);
+
+  const normalized = normalizeSectorInterpretation({
+    headline: "模型标题",
+    coreConclusion: "模型结论",
+    whyRise: ["订单催化", "资金回流"],
+    beneficiaries: [{ name: "测试龙头", reason: "设备订单改善" }],
+    continuity: { level: "较强", text: "资金和订单共振" },
+    watchSignals: ["成交额继续放大"],
+    risks: ["高位分化"]
+  }, fallback, { source: "同花顺问财模型" });
+  assert.equal(normalized.headline, "模型标题");
+  assert.equal(normalized.continuity.level, "较强");
+  assert.match(normalized.beneficiaries[0].reason, /订单/);
+});
+
 test("hot leader detail uses modal and keeps type guide visible", () => {
   const html = fs.readFileSync(path.join(__dirname, "../public/index.html"), "utf8");
   const app = fs.readFileSync(path.join(__dirname, "../public/app.js"), "utf8");
@@ -672,6 +725,7 @@ test("stock chip insight builds cost pressure support and AI risk diagnosis", ()
 test("breakout alerts expose configurable sound and popup controls", () => {
   const html = fs.readFileSync(path.join(__dirname, "../public/index.html"), "utf8");
   const app = fs.readFileSync(path.join(__dirname, "../public/app.js"), "utf8");
+  const css = fs.readFileSync(path.join(__dirname, "../public/styles.css"), "utf8");
   assert.match(html, /id="breakoutAlertEnabled"/);
   assert.match(html, /id="breakoutAlertSound"/);
   assert.match(html, /id="breakoutAlertPopup"/);
@@ -682,6 +736,14 @@ test("breakout alerts expose configurable sound and popup controls", () => {
   assert.match(app, /function playBreakoutAlertSound/);
   assert.match(app, /localStorage\.setItem\(BREAKOUT_ALERT_STORAGE_KEY/);
   assert.match(html, /热点事件解读/);
+  assert.match(app, /function renderSectorInterpretationCard/);
+  assert.match(app, /问财模型解读/);
+  assert.match(app, /为什么涨/);
+  assert.match(app, /受益股票/);
+  assert.match(app, /持续性/);
+  assert.match(app, /风险点/);
+  assert.match(css, /sector-interpretation-card/);
+  assert.match(css, /interpretation-grid/);
   assert.match(app, /AI股票分析/);
   assert.match(app, /大单成本区/);
 });

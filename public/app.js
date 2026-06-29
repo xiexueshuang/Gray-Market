@@ -1000,7 +1000,7 @@ async function loadSectorDetail(code) {
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "请求失败");
-    renderSectorDetail(payload.board, payload.rows, payload.news);
+    renderSectorDetail(payload.board, payload.rows, payload.news, payload.interpretation);
   } catch (error) {
     els.sectorDetailTitle.textContent = "板块详情";
     els.sectorDetailMeta.textContent = error.name === "AbortError" ? "板块详情请求超时" : error.message;
@@ -1009,7 +1009,7 @@ async function loadSectorDetail(code) {
   }
 }
 
-function renderSectorDetail(board, rows, news) {
+function renderSectorDetail(board, rows, news, interpretation) {
   els.sectorDetailTitle.textContent = `${board.name} · 板块详情`;
   els.sectorDetailMeta.textContent = `${board.reason}。${board.risk}`;
   els.sectorDetailBadge.textContent = board.status;
@@ -1040,7 +1040,7 @@ function renderSectorDetail(board, rows, news) {
       <strong>${money(board.oneDayFlow.amount)} · 成交变化 ${pct(board.oneDayFlow.amountChangePct)}</strong>
     </div>
   `;
-  renderSectorNews(news);
+  renderSectorNews(news, interpretation);
   els.sectorDetailRows.innerHTML = rows.map((row) => `
     <tr>
       <td><strong>${row.score.toFixed(2)}</strong></td>
@@ -1062,9 +1062,10 @@ function renderSectorDetail(board, rows, news) {
   `).join("");
 }
 
-function renderSectorNews(news) {
+function renderSectorNews(news, interpretation) {
   const list = document.querySelector("#sectorNewsList");
   if (!list) return;
+  const model = interpretation || news?.interpretation;
   const items = news?.items?.length ? news.items : [{
     title: "暂无明确利好，等待确认",
     source: "系统提示",
@@ -1076,15 +1077,84 @@ function renderSectorNews(news) {
     risk: "等待消息源和资金线同步确认。",
     url: ""
   }];
-  list.innerHTML = items.map((item) => `
+  const modelCard = model ? renderSectorInterpretationCard(model) : "";
+  const eventCards = items.map((item) => `
     <article class="news-item">
-      <div class="news-title">${item.url ? `<a href="${item.url}" target="_blank" rel="noreferrer">${item.title}</a>` : item.title}</div>
-      <div class="news-meta">${item.source || "待确认"} · ${item.publishTime || "待确认"} · ${item.eventType || "热点事件"}</div>
-      <p>${item.summary || "暂无摘要"}</p>
-      <p>${item.impact || "影响链待确认"}</p>
-      <p>相关个股：${item.relatedStocks || "待确认"}；风险：${item.risk || "等待资金线确认"}</p>
+      <div class="news-title">${item.url ? `<a href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">${escapeHtml(item.title)}</a>` : escapeHtml(item.title)}</div>
+      <div class="news-meta">${escapeHtml(item.source || "待确认")} · ${escapeHtml(item.publishTime || "待确认")} · ${escapeHtml(item.eventType || "热点事件")}</div>
+      <p>${escapeHtml(item.summary || "暂无摘要")}</p>
+      <p>${escapeHtml(item.impact || "影响链待确认")}</p>
+      <p>相关个股：${escapeHtml(item.relatedStocks || "待确认")}；风险：${escapeHtml(item.risk || "等待资金线确认")}</p>
     </article>
   `).join("");
+  list.innerHTML = `${modelCard}${eventCards}`;
+}
+
+function renderSectorInterpretationCard(model) {
+  const whyRise = renderInterpretationList(model.whyRise);
+  const watchSignals = renderInterpretationList(model.watchSignals);
+  const risks = renderInterpretationList(model.risks);
+  const modelLabel = String(model.source || "").includes("本地规则") ? "规则解读" : "问财模型解读";
+  const beneficiaries = (model.beneficiaries || []).slice(0, 8).map((item) => `
+    <li>
+      <strong>${escapeHtml(item.name || "待确认")}</strong>
+      <span>${escapeHtml(item.reason || "受益逻辑待确认")}</span>
+    </li>
+  `).join("");
+  const warning = model.warning ? `<div class="interpretation-warning">${escapeHtml(model.warning)}</div>` : "";
+  return `
+    <article class="sector-interpretation-card">
+      <div class="interpretation-head">
+        <div>
+          <span class="model-pill">${escapeHtml(modelLabel)}</span>
+          <h3>${escapeHtml(model.headline || "热点事件解读待确认")}</h3>
+          <p>${escapeHtml(model.coreConclusion || "等待模型生成板块解读。")}</p>
+        </div>
+        <div class="interpretation-source">
+          <span>${escapeHtml(model.source || "同花顺问财模型")}</span>
+          <span>${escapeHtml(model.generatedAt || "待确认")}</span>
+        </div>
+      </div>
+      ${warning}
+      <div class="interpretation-grid">
+        <section>
+          <h4>为什么涨</h4>
+          <ul>${whyRise}</ul>
+        </section>
+        <section>
+          <h4>持续性</h4>
+          <div class="continuity-badge">${escapeHtml(model.continuity?.level || "待确认")}</div>
+          <p>${escapeHtml(model.continuity?.text || "持续性等待资金和核心股承接确认。")}</p>
+        </section>
+        <section>
+          <h4>后续观察</h4>
+          <ul>${watchSignals}</ul>
+        </section>
+        <section>
+          <h4>风险点</h4>
+          <ul>${risks}</ul>
+        </section>
+      </div>
+      <section class="beneficiary-panel">
+        <h4>受益股票</h4>
+        <ul>${beneficiaries || `<li><strong>待确认</strong><span>暂无明确受益股。</span></li>`}</ul>
+      </section>
+    </article>
+  `;
+}
+
+function renderInterpretationList(items = []) {
+  const rows = items.length ? items : ["待确认"];
+  return rows.slice(0, 6).map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
 let lightweightChartsPromise = null;

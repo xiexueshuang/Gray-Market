@@ -5,6 +5,13 @@ const state = {
   sortDir: "desc",
   lastPayload: null,
   view: "tracker",
+  watchRows: [],
+  filteredWatchRows: [],
+  watchSortKey: "watchScore",
+  watchSortDir: "desc",
+  watchPeriod: 1,
+  watchFilter: "all",
+  selectedWatchCode: "",
   sectorRows: [],
   filteredSectorRows: [],
   sectorSortKey: "rotationScore",
@@ -20,10 +27,31 @@ const state = {
   breakoutRows: [],
   filteredBreakoutRows: [],
   breakoutSortKey: "breakoutScore",
-  breakoutSortDir: "desc"
+  breakoutSortDir: "desc",
+  breakoutAlert: {
+    enabled: false,
+    sound: true,
+    popup: true,
+    minScore: 78,
+    stage: "刚起爆"
+  },
+  breakoutAlertSeen: new Set(),
+  detailCharts: {
+    watch: [],
+    hot: []
+  }
 };
 
 const API_BASE = window.location.protocol === "file:" ? "http://localhost:4173" : "";
+const BREAKOUT_ALERT_STORAGE_KEY = "grayMarket.breakoutAlertSettings";
+const LIGHTWEIGHT_CHARTS_SRC = `${API_BASE}/vendor/lightweight-charts.standalone.production.js`;
+const BREAKOUT_STAGE_RANK = {
+  "观察": 1,
+  "升温": 2,
+  "刚起爆": 3,
+  "试盘": 0
+};
+let breakoutAudioContext = null;
 
 const modes = {
   balanced: { minAmount: 8, minVolumeRatio: 1.2, maxChange: 8, maxAmplitude: 9 },
@@ -53,6 +81,29 @@ const els = {
   rowsBody: document.querySelector("#rowsBody"),
   searchInput: document.querySelector("#searchInput"),
   trackerView: document.querySelector("#trackerView"),
+  watchView: document.querySelector("#watchView"),
+  watchTimestamp: document.querySelector("#watchTimestamp"),
+  watchSourceBadge: document.querySelector("#watchSourceBadge"),
+  watchCount: document.querySelector("#watchCount"),
+  watchConfluenceCount: document.querySelector("#watchConfluenceCount"),
+  watchBreakoutCount: document.querySelector("#watchBreakoutCount"),
+  watchStrongCount: document.querySelector("#watchStrongCount"),
+  watchPositiveFlow: document.querySelector("#watchPositiveFlow"),
+  watchAvgScore: document.querySelector("#watchAvgScore"),
+  watchFocusList: document.querySelector("#watchFocusList"),
+  watchRowsBody: document.querySelector("#watchRowsBody"),
+  watchSearchInput: document.querySelector("#watchSearchInput"),
+  watchState: document.querySelector("#watchState"),
+  watchDetailModal: document.querySelector("#watchDetailModal"),
+  watchDetailClose: document.querySelector("#watchDetailClose"),
+  watchDetailTitle: document.querySelector("#watchDetailTitle"),
+  watchDetailMeta: document.querySelector("#watchDetailMeta"),
+  watchDetailBadge: document.querySelector("#watchDetailBadge"),
+  watchDetailCards: document.querySelector("#watchDetailCards"),
+  watchChartPanel: document.querySelector("#watchChartPanel"),
+  watchChartState: document.querySelector("#watchChartState"),
+  watchIntradayChart: document.querySelector("#watchIntradayChart"),
+  watchDailyChart: document.querySelector("#watchDailyChart"),
   sectorView: document.querySelector("#sectorView"),
   hotView: document.querySelector("#hotView"),
   breakoutView: document.querySelector("#breakoutView"),
@@ -87,6 +138,10 @@ const els = {
   hotDetailMeta: document.querySelector("#hotDetailMeta"),
   hotDetailBadge: document.querySelector("#hotDetailBadge"),
   hotDetailCards: document.querySelector("#hotDetailCards"),
+  hotChartPanel: document.querySelector("#hotChartPanel"),
+  hotChartState: document.querySelector("#hotChartState"),
+  hotIntradayChart: document.querySelector("#hotIntradayChart"),
+  hotDailyChart: document.querySelector("#hotDailyChart"),
   breakoutTimestamp: document.querySelector("#breakoutTimestamp"),
   breakoutSourceBadge: document.querySelector("#breakoutSourceBadge"),
   breakoutCount: document.querySelector("#breakoutCount"),
@@ -97,6 +152,19 @@ const els = {
   breakoutRowsBody: document.querySelector("#breakoutRowsBody"),
   breakoutSearchInput: document.querySelector("#breakoutSearchInput"),
   breakoutState: document.querySelector("#breakoutState"),
+  breakoutAlertEnabled: document.querySelector("#breakoutAlertEnabled"),
+  breakoutAlertSound: document.querySelector("#breakoutAlertSound"),
+  breakoutAlertPopup: document.querySelector("#breakoutAlertPopup"),
+  breakoutAlertMinScore: document.querySelector("#breakoutAlertMinScore"),
+  breakoutAlertMinScoreOut: document.querySelector("#breakoutAlertMinScoreOut"),
+  breakoutAlertStage: document.querySelector("#breakoutAlertStage"),
+  breakoutAlertTest: document.querySelector("#breakoutAlertTest"),
+  breakoutAlertModal: document.querySelector("#breakoutAlertModal"),
+  breakoutAlertClose: document.querySelector("#breakoutAlertClose"),
+  breakoutAlertTitle: document.querySelector("#breakoutAlertTitle"),
+  breakoutAlertMeta: document.querySelector("#breakoutAlertMeta"),
+  breakoutAlertBadge: document.querySelector("#breakoutAlertBadge"),
+  breakoutAlertList: document.querySelector("#breakoutAlertList"),
   toast: document.querySelector("#toast")
 };
 
@@ -125,6 +193,46 @@ function fixed(value, digits = 2) {
 
 function codeOf(row) {
   return `${row.exchange}${row.code}`;
+}
+
+function loadBreakoutAlertSettings() {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(BREAKOUT_ALERT_STORAGE_KEY) || "{}");
+    state.breakoutAlert = {
+      enabled: Boolean(saved.enabled),
+      sound: saved.sound !== false,
+      popup: saved.popup !== false,
+      minScore: Number.isFinite(Number(saved.minScore)) ? Number(saved.minScore) : 78,
+      stage: ["刚起爆", "升温", "观察"].includes(saved.stage) ? saved.stage : "刚起爆"
+    };
+  } catch {
+    state.breakoutAlert = { enabled: false, sound: true, popup: true, minScore: 78, stage: "刚起爆" };
+  }
+}
+
+function saveBreakoutAlertSettings() {
+  window.localStorage.setItem(BREAKOUT_ALERT_STORAGE_KEY, JSON.stringify(state.breakoutAlert));
+}
+
+function syncBreakoutAlertControls() {
+  els.breakoutAlertEnabled.checked = state.breakoutAlert.enabled;
+  els.breakoutAlertSound.checked = state.breakoutAlert.sound;
+  els.breakoutAlertPopup.checked = state.breakoutAlert.popup;
+  els.breakoutAlertMinScore.value = state.breakoutAlert.minScore;
+  els.breakoutAlertMinScoreOut.textContent = String(state.breakoutAlert.minScore);
+  els.breakoutAlertStage.value = state.breakoutAlert.stage;
+}
+
+function readBreakoutAlertControls() {
+  state.breakoutAlert = {
+    enabled: els.breakoutAlertEnabled.checked,
+    sound: els.breakoutAlertSound.checked,
+    popup: els.breakoutAlertPopup.checked,
+    minScore: Number(els.breakoutAlertMinScore.value),
+    stage: els.breakoutAlertStage.value
+  };
+  syncBreakoutAlertControls();
+  saveBreakoutAlertSettings();
 }
 
 function statusClass(status) {
@@ -169,6 +277,10 @@ function params() {
 }
 
 async function refresh() {
+  if (state.view === "watch") {
+    await refreshWatchlist();
+    return;
+  }
   if (state.view === "sectors") {
     await refreshSectors();
     return;
@@ -200,6 +312,32 @@ async function refresh() {
     showToast(payload.warning || "行情已更新");
   } catch (error) {
     showToast(error.name === "AbortError" ? "行情请求超时" : error.message);
+  } finally {
+    window.clearTimeout(timeoutId);
+    els.refreshBtn.disabled = false;
+    els.refreshBtn.textContent = "↻ 刷新";
+  }
+}
+
+async function refreshWatchlist() {
+  els.refreshBtn.disabled = true;
+  els.refreshBtn.textContent = "刷新中";
+  els.watchState.textContent = "盯盘总榜数据加载中";
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 45_000);
+  try {
+    const response = await fetch(`${API_BASE}/api/watchlist?period=${state.watchPeriod}&limit=80`, {
+      cache: "no-store",
+      signal: controller.signal
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "请求失败");
+    state.watchRows = payload.rows;
+    renderWatchlist(payload);
+    showToast(payload.warning || "盯盘总榜已更新");
+  } catch (error) {
+    els.watchState.textContent = error.name === "AbortError" ? "盯盘总榜请求超时" : error.message;
+    showToast(els.watchState.textContent);
   } finally {
     window.clearTimeout(timeoutId);
     els.refreshBtn.disabled = false;
@@ -297,6 +435,22 @@ function render(payload) {
   renderTable();
 }
 
+function renderWatchlist(payload) {
+  els.watchCount.textContent = payload.stats.total;
+  els.watchConfluenceCount.textContent = payload.stats.confluence;
+  els.watchBreakoutCount.textContent = payload.stats.freshBreakout;
+  els.watchStrongCount.textContent = payload.stats.strong;
+  els.watchPositiveFlow.textContent = payload.stats.positiveFlow;
+  els.watchAvgScore.textContent = fixed(payload.stats.avgScore, 1);
+  els.watchTimestamp.textContent = payload.warning ? `数据时间：${payload.timestamp} · ${payload.warning}` : `数据时间：${payload.timestamp}`;
+  els.watchSourceBadge.textContent = payload.source;
+  applyWatchSearchAndSort();
+  renderWatchFocus();
+  renderWatchTable();
+  els.watchState.textContent = state.filteredWatchRows.length ? "" : "当前筛选条件下没有盯盘候选";
+  handleBreakoutAlerts(payload.rows);
+}
+
 function renderSectors(payload) {
   els.sectorCount.textContent = payload.stats.total;
   els.sectorHotCount.textContent = `${payload.stats.strong}/${payload.stats.warming}`;
@@ -338,6 +492,111 @@ function renderBreakouts(payload) {
   renderBreakoutFocus();
   renderBreakoutTable();
   els.breakoutState.textContent = state.filteredBreakoutRows.length ? "" : "当前没有符合条件的起爆预警";
+  handleBreakoutAlerts(payload.rows);
+}
+
+function applyWatchSearchAndSort() {
+  const keyword = els.watchSearchInput.value.trim().toLowerCase();
+  state.filteredWatchRows = state.watchRows.filter((row) => {
+    const haystack = [
+      row.name,
+      codeOf(row),
+      row.sectorName,
+      row.sourceType,
+      row.breakoutStage,
+      ...(row.tags || [])
+    ].join(" ").toLowerCase();
+    return haystack.includes(keyword) && watchFilterMatch(row);
+  });
+  state.filteredWatchRows.sort((a, b) => {
+    const av = watchSortValue(a, state.watchSortKey);
+    const bv = watchSortValue(b, state.watchSortKey);
+    const result = typeof av === "number" && typeof bv === "number"
+      ? av - bv
+      : String(av ?? "").localeCompare(String(bv ?? ""), "zh-CN");
+    return state.watchSortDir === "asc" ? result : -result;
+  });
+}
+
+function watchSortValue(row, key) {
+  if (key === "code") return codeOf(row);
+  if (key === "sourceType") return (row.tags || []).join("/");
+  return row[key];
+}
+
+function watchFilterMatch(row) {
+  if (state.watchFilter === "confluence") return row.isConfluence;
+  if (state.watchFilter === "freshBreakout") return row.breakoutStage === "刚起爆";
+  if (state.watchFilter === "strong") return row.grade === "强关注";
+  if (state.watchFilter === "positive") return row.isPositiveFlow;
+  if (state.watchFilter === "hotOnly") return row.hasHot && !row.hasBreakout;
+  if (state.watchFilter === "breakoutOnly") return row.hasBreakout && !row.hasHot;
+  if (state.watchFilter === "new") return row.isNewSignal;
+  return true;
+}
+
+function tagStyle(tag) {
+  if (tag === "双榜共振" || tag === "刚起爆") return "hot";
+  if (tag === "强关注" || tag === "资金双正") return "strong";
+  if (tag === "起爆预警") return "warm";
+  if (tag === "热度龙头") return "split";
+  return "";
+}
+
+function renderWatchTags(row) {
+  return (row.tags || []).map((tag) => `<span class="tag ${tagStyle(tag)}">${tag}</span>`).join("");
+}
+
+function renderWatchFocus() {
+  const rows = state.filteredWatchRows.slice(0, 4);
+  els.watchFocusList.innerHTML = rows.map((row) => `
+    <article class="focus-item watch-card" data-code="${row.code}" role="button" tabindex="0" title="查看${row.name}盯盘详情">
+      <div class="focus-title">
+        <div>
+          <div class="stock-code">${codeOf(row)} · ${row.sectorName}</div>
+          <div class="stock-name">${row.name}</div>
+        </div>
+        <span class="score">${fixed(row.watchScore, 1)}</span>
+      </div>
+      <div class="watch-tags">${renderWatchTags(row)}</div>
+      <div class="focus-grid">
+        <div class="mini"><span>阶段</span><strong>${row.breakoutStage || "待确认"}</strong></div>
+        <div class="mini"><span>热度</span><strong>${Number.isFinite(row.heatRank) ? `第${row.heatRank}` : "待确认"}</strong></div>
+        <div class="mini"><span>涨幅</span><strong class="${row.changePct >= 0 ? "up" : "down"}">${pct(row.changePct)}</strong></div>
+      </div>
+      <div class="concept-line">${row.watchNote}</div>
+      <div class="bars">
+        ${bar("起爆", row.breakoutScore || 0, Math.min((row.breakoutScore || 0) / 100, 1) * 100)}
+        ${bar("承接", row.carryScore || 0, Math.min((row.carryScore || 0) / 100, 1) * 100)}
+        ${bar("DDE", row.ddeNetAmount || 0, Math.min(Math.abs(row.ddeNetAmount || 0) / 800_000_000, 1) * 100)}
+      </div>
+    </article>
+  `).join("");
+}
+
+function renderWatchTable() {
+  els.watchRowsBody.innerHTML = state.filteredWatchRows.map((row) => `
+    <tr class="watch-row ${row.code === state.selectedWatchCode ? "is-selected" : ""}" data-code="${row.code}" role="button" tabindex="0" title="查看${row.name}盯盘详情">
+      <td>${row.rank}</td>
+      <td>${codeOf(row)}</td>
+      <td><strong>${row.name}</strong></td>
+      <td>${row.sectorName}</td>
+      <td><strong>${fixed(row.watchScore, 2)}</strong></td>
+      <td><div class="watch-tags compact-tags">${renderWatchTags(row)}</div></td>
+      <td><span class="tag ${tagStyle(row.breakoutStage)}">${row.breakoutStage || "待确认"}</span></td>
+      <td>${Number.isFinite(row.heatRank) ? row.heatRank : "待确认"}</td>
+      <td>${Number.isFinite(row.xueqiuRank) ? row.xueqiuRank : "未上榜"}</td>
+      <td class="${row.changePct >= 0 ? "up" : "down"}">${pct(row.changePct)}</td>
+      <td>${money(row.amount)}</td>
+      <td>${fixed(row.volumeRatio, 2)}</td>
+      <td class="${row.mainInflow >= 0 ? "up" : "down"}">${money(row.mainInflow)}</td>
+      <td class="${row.superInflow >= 0 ? "up" : "down"}">${money(row.superInflow)}</td>
+      <td class="${row.ddeNetAmount >= 0 ? "up" : "down"}">${money(row.ddeNetAmount)}</td>
+      <td>${money(row.largeOrderAmount)}</td>
+      <td>${row.riskLine || "待确认"}</td>
+      <td>${row.watchNote || "待确认"}</td>
+    </tr>
+  `).join("");
 }
 
 function applyBreakoutSearchAndSort() {
@@ -395,6 +654,8 @@ function renderBreakoutTable() {
       <td>${fixed(row.volumeRatio, 2)}</td>
       <td class="${row.mainInflow >= 0 ? "up" : "down"}">${money(row.mainInflow)}</td>
       <td class="${row.superInflow >= 0 ? "up" : "down"}">${money(row.superInflow)}</td>
+      <td class="${row.ddeNetAmount >= 0 ? "up" : "down"}">${money(row.ddeNetAmount)}</td>
+      <td>${money(row.largeOrderAmount)}</td>
       <td>${Number.isFinite(row.heatRank) ? row.heatRank : "待确认"}</td>
       <td>${Number.isFinite(row.xueqiuRank) ? row.xueqiuRank : "未上榜"}</td>
       <td>${fixed(row.volumeScore, 1)}</td>
@@ -406,6 +667,95 @@ function renderBreakoutTable() {
       <td>${row.entryCondition}</td>
     </tr>
   `).join("");
+}
+
+function handleBreakoutAlerts(rows) {
+  if (!state.breakoutAlert.enabled) return;
+  const matches = rows.filter(isBreakoutAlertMatch);
+  const freshMatches = matches.filter((row) => !state.breakoutAlertSeen.has(breakoutAlertKey(row)));
+  if (!freshMatches.length) return;
+  freshMatches.forEach((row) => state.breakoutAlertSeen.add(breakoutAlertKey(row)));
+  if (state.breakoutAlert.sound) playBreakoutAlertSound();
+  if (state.breakoutAlert.popup) openBreakoutAlertModal(freshMatches);
+  showToast(`起爆警报：${freshMatches.length} 只股票触发`);
+}
+
+function isBreakoutAlertMatch(row) {
+  const requiredStage = BREAKOUT_STAGE_RANK[state.breakoutAlert.stage] ?? 3;
+  const stage = row.breakoutStage || row.stage;
+  const rowStage = BREAKOUT_STAGE_RANK[stage] ?? 0;
+  return Number(row.breakoutScore || row.watchScore) >= state.breakoutAlert.minScore && rowStage >= requiredStage;
+}
+
+function breakoutAlertKey(row) {
+  const stage = row.breakoutStage || row.stage;
+  return `${row.code}:${stage}:${Math.floor(Number(row.breakoutScore || row.watchScore) || 0)}`;
+}
+
+function openBreakoutAlertModal(rows) {
+  const topRows = rows.slice(0, 8);
+  els.breakoutAlertTitle.textContent = "起爆信号警报";
+  els.breakoutAlertMeta.textContent = `${topRows.length} 只股票达到 ${state.breakoutAlert.stage} / ${state.breakoutAlert.minScore} 分条件`;
+  els.breakoutAlertBadge.textContent = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+  els.breakoutAlertList.innerHTML = topRows.map((row) => `
+    <article class="alert-item">
+      <div>
+        <div class="stock-code">${codeOf(row)} · ${row.sectorName}</div>
+        <strong>${row.name}</strong>
+      </div>
+      <div class="alert-score">${fixed(row.watchScore || row.breakoutScore, 1)}</div>
+      <div class="alert-detail">
+        <span>${row.breakoutStage || row.stage}</span>
+        <span>热度 ${Number.isFinite(row.heatRank) ? `第${row.heatRank}` : "待确认"}</span>
+        <span class="${row.changePct >= 0 ? "up" : "down"}">${pct(row.changePct)}</span>
+        <span>量比 ${fixed(row.volumeRatio, 2)}</span>
+        <span>DDE ${money(row.ddeNetAmount)}</span>
+        <span>大单 ${money(row.largeOrderAmount)}</span>
+      </div>
+      <p>${row.breakoutReason || row.reason || row.watchNote}</p>
+      <p>风险线：${row.riskLine || row.risk || "待确认"}</p>
+    </article>
+  `).join("");
+  els.breakoutAlertModal.hidden = false;
+  document.body.classList.add("modal-open");
+}
+
+function closeBreakoutAlertModal() {
+  els.breakoutAlertModal.hidden = true;
+  document.body.classList.remove("modal-open");
+}
+
+function getBreakoutAudioContext() {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return null;
+  if (!breakoutAudioContext) breakoutAudioContext = new AudioContextClass();
+  return breakoutAudioContext;
+}
+
+function unlockBreakoutAlertSound() {
+  const context = getBreakoutAudioContext();
+  if (context && context.state === "suspended") context.resume();
+}
+
+function playBreakoutAlertSound() {
+  const context = getBreakoutAudioContext();
+  if (!context) return;
+  if (context.state === "suspended") context.resume();
+  const now = context.currentTime;
+  [0, 0.18, 0.36].forEach((offset) => {
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = "sine";
+    oscillator.frequency.setValueAtTime(880, now + offset);
+    oscillator.frequency.exponentialRampToValueAtTime(1180, now + offset + 0.08);
+    gain.gain.setValueAtTime(0.0001, now + offset);
+    gain.gain.exponentialRampToValueAtTime(0.12, now + offset + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + offset + 0.14);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start(now + offset);
+    oscillator.stop(now + offset + 0.16);
+  });
 }
 
 function applyHotSearchAndSort() {
@@ -623,6 +973,8 @@ function renderTable() {
       <td class="${row.mainInflow >= 0 ? "up" : "down"}">${money(row.mainInflow)}</td>
       <td class="${row.superInflow >= 0 ? "up" : "down"}">${money(row.superInflow)} (${pct(row.superPct)})</td>
       <td class="${row.largeInflow >= 0 ? "up" : "down"}">${money(row.largeInflow)} (${pct(row.largePct)})</td>
+      <td class="${row.ddeNetAmount >= 0 ? "up" : "down"}">${money(row.ddeNetAmount)}</td>
+      <td>${money(row.largeOrderAmount)}</td>
       <td><span class="tag ${tagClass(row.tag)}">${row.tag}</span> ${row.reason}</td>
       <td>${row.risk}</td>
     </tr>
@@ -638,7 +990,7 @@ async function loadSectorDetail(code) {
   els.sectorDetailRows.innerHTML = "";
   els.sectorDetailCards.innerHTML = "";
   const newsList = document.querySelector("#sectorNewsList");
-  if (newsList) newsList.innerHTML = `<article class="news-item"><div class="news-title">利好消息加载中</div><div class="news-meta">同花顺财经资讯搜索</div><p>正在匹配板块名称、核心个股和题材关键词。</p></article>`;
+  if (newsList) newsList.innerHTML = `<article class="news-item"><div class="news-title">热点事件加载中</div><div class="news-meta">同花顺财经资讯搜索 · 最近一周</div><p>正在匹配板块名称、核心个股和题材关键词。</p></article>`;
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), 18_000);
   try {
@@ -702,6 +1054,8 @@ function renderSectorDetail(board, rows, news) {
       <td class="${row.mainInflow >= 0 ? "up" : "down"}">${money(row.mainInflow)}</td>
       <td class="${row.superInflow >= 0 ? "up" : "down"}">${money(row.superInflow)} (${pct(row.superPct)})</td>
       <td class="${row.largeInflow >= 0 ? "up" : "down"}">${money(row.largeInflow)} (${pct(row.largePct)})</td>
+      <td class="${row.ddeNetAmount >= 0 ? "up" : "down"}">${money(row.ddeNetAmount)}</td>
+      <td>${money(row.largeOrderAmount)}</td>
       <td><span class="tag ${tagClass(row.tag)}">${row.tag}</span> ${row.reason}</td>
       <td>${row.risk}</td>
     </tr>
@@ -716,15 +1070,397 @@ function renderSectorNews(news) {
     source: "系统提示",
     publishTime: "待确认",
     summary: "当前未匹配到可用的板块利好资讯。",
+    eventType: "待确认",
+    impact: "热点驱动待确认，优先观察板块成交额和龙头承接。",
+    relatedStocks: "待确认",
+    risk: "等待消息源和资金线同步确认。",
     url: ""
   }];
   list.innerHTML = items.map((item) => `
     <article class="news-item">
       <div class="news-title">${item.url ? `<a href="${item.url}" target="_blank" rel="noreferrer">${item.title}</a>` : item.title}</div>
-      <div class="news-meta">${item.source || "待确认"} · ${item.publishTime || "待确认"}</div>
+      <div class="news-meta">${item.source || "待确认"} · ${item.publishTime || "待确认"} · ${item.eventType || "热点事件"}</div>
       <p>${item.summary || "暂无摘要"}</p>
+      <p>${item.impact || "影响链待确认"}</p>
+      <p>相关个股：${item.relatedStocks || "待确认"}；风险：${item.risk || "等待资金线确认"}</p>
     </article>
   `).join("");
+}
+
+let lightweightChartsPromise = null;
+
+function ensureChartLibrary() {
+  if (window.LightweightCharts) return Promise.resolve(window.LightweightCharts);
+  if (lightweightChartsPromise) return lightweightChartsPromise;
+  lightweightChartsPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = LIGHTWEIGHT_CHARTS_SRC;
+    script.async = true;
+    script.onload = () => window.LightweightCharts ? resolve(window.LightweightCharts) : reject(new Error("图表库加载失败"));
+    script.onerror = () => reject(new Error("图表库加载失败"));
+    document.head.appendChild(script);
+  });
+  return lightweightChartsPromise;
+}
+
+function detailChartElements(scope) {
+  if (scope === "watch") {
+    return {
+      panel: els.watchChartPanel,
+      state: els.watchChartState,
+      intraday: els.watchIntradayChart,
+      daily: els.watchDailyChart
+    };
+  }
+  return {
+    panel: els.hotChartPanel,
+    state: els.hotChartState,
+    intraday: els.hotIntradayChart,
+    daily: els.hotDailyChart
+  };
+}
+
+function clearDetailCharts(scope) {
+  state.detailCharts[scope].forEach((item) => {
+    item.observer?.disconnect();
+    item.chart?.remove();
+  });
+  state.detailCharts[scope] = [];
+}
+
+function prepareChartPanel(scope, message) {
+  const chartEls = detailChartElements(scope);
+  clearDetailCharts(scope);
+  chartEls.panel.hidden = false;
+  chartEls.state.textContent = message;
+  chartEls.intraday.innerHTML = `<div class="chart-empty">分时图加载中</div>`;
+  chartEls.daily.innerHTML = `<div class="chart-empty">日K线加载中</div>`;
+}
+
+async function loadStockCharts(scope, row) {
+  const chartEls = detailChartElements(scope);
+  prepareChartPanel(scope, "图表加载中");
+  const exchange = row.exchange ? `&exchange=${encodeURIComponent(row.exchange)}` : "";
+  try {
+    const [library, response] = await Promise.all([
+      ensureChartLibrary(),
+      fetch(`${API_BASE}/api/stock-chart?code=${encodeURIComponent(row.code)}${exchange}`, { cache: "no-store" })
+    ]);
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "图表请求失败");
+    renderStockCharts(scope, payload, library);
+  } catch (error) {
+    clearDetailCharts(scope);
+    chartEls.state.textContent = error.message;
+    chartEls.intraday.innerHTML = `<div class="chart-empty">分时图待确认</div>`;
+    chartEls.daily.innerHTML = `<div class="chart-empty">日K线待确认</div>`;
+  }
+}
+
+function renderStockCharts(scope, payload, library) {
+  const chartEls = detailChartElements(scope);
+  clearDetailCharts(scope);
+  chartEls.intraday.innerHTML = "";
+  chartEls.daily.innerHTML = "";
+  const missing = missingLevelText(payload.levels || {});
+  chartEls.state.textContent = `${payload.source}${payload.warning ? ` · ${payload.warning}` : ""}${missing}`;
+  if (payload.intraday?.length) {
+    renderIntradayChart(scope, chartEls.intraday, payload, library);
+  } else {
+    chartEls.intraday.innerHTML = `<div class="chart-empty">分时图暂无可用数据</div>`;
+  }
+  if (payload.daily?.length) {
+    renderDailyChart(scope, chartEls.daily, payload, library);
+  } else {
+    chartEls.daily.innerHTML = `<div class="chart-empty">日K线暂无可用数据</div>`;
+  }
+}
+
+function renderIntradayChart(scope, container, payload, library) {
+  const chart = createBaseChart(container, library);
+  addCostZoneArea(chart, payload.levels || {}, payload.intraday, library);
+  const priceSeries = chart.addLineSeries({ color: "#c2413a", lineWidth: 2, title: "价格" });
+  priceSeries.setData(payload.intraday.map((point) => ({ time: point.timestamp, value: point.price })));
+  const averageData = payload.intraday
+    .filter((point) => Number.isFinite(point.average))
+    .map((point) => ({ time: point.timestamp, value: point.average }));
+  if (averageData.length) {
+    const averageSeries = chart.addLineSeries({
+      color: "#0f766e",
+      lineWidth: 1,
+      title: "均线",
+      lastValueVisible: false,
+      priceLineVisible: false
+    });
+    averageSeries.setData(averageData);
+  }
+  addLevelLines(priceSeries, payload.levels || {}, library);
+  trackChartResize(scope, chart, container);
+  chart.timeScale().fitContent();
+}
+
+function renderDailyChart(scope, container, payload, library) {
+  const chart = createBaseChart(container, library);
+  addCostZoneArea(chart, payload.levels || {}, payload.daily, library);
+  const candleSeries = chart.addCandlestickSeries({
+    upColor: "#c2413a",
+    downColor: "#17834f",
+    borderUpColor: "#c2413a",
+    borderDownColor: "#17834f",
+    wickUpColor: "#c2413a",
+    wickDownColor: "#17834f"
+  });
+  candleSeries.setData(payload.daily.map((point) => ({
+    time: point.date,
+    open: point.open,
+    high: point.high,
+    low: point.low,
+    close: point.close
+  })));
+  [
+    ["EMA5", payload.movingAverages?.ma5 || [], "#2563eb"],
+    ["EMA10", payload.movingAverages?.ma10 || [], "#b7791f"],
+    ["EMA20", payload.movingAverages?.ma20 || [], "#6a645c"]
+  ].forEach(([title, data, color]) => {
+    if (!data.length) return;
+    const series = chart.addLineSeries({
+      color,
+      lineWidth: 1,
+      title,
+      lastValueVisible: false,
+      priceLineVisible: false
+    });
+    series.setData(data);
+  });
+  addLevelLines(candleSeries, payload.levels || {}, library);
+  trackChartResize(scope, chart, container);
+  chart.timeScale().fitContent();
+}
+
+function createBaseChart(container, library) {
+  return library.createChart(container, {
+    width: Math.max(container.clientWidth, 320),
+    height: Math.max(container.clientHeight, 360),
+    layout: {
+      background: { color: "#fffdf8" },
+      textColor: "#202020"
+    },
+    grid: {
+      vertLines: { color: "#eee8de" },
+      horzLines: { color: "#eee8de" }
+    },
+    rightPriceScale: { borderColor: "#d8d0c4" },
+    timeScale: { borderColor: "#d8d0c4", timeVisible: true, secondsVisible: false },
+    crosshair: { mode: library.CrosshairMode.Normal }
+  });
+}
+
+function trackChartResize(scope, chart, container) {
+  const observer = new ResizeObserver(() => {
+    chart.applyOptions({
+      width: Math.max(container.clientWidth, 320),
+      height: Math.max(container.clientHeight, 360)
+    });
+  });
+  observer.observe(container);
+  state.detailCharts[scope].push({ chart, observer });
+}
+
+function addCostZoneArea(chart, levels, rows, library) {
+  if (!Number.isFinite(levels.costLow) || !Number.isFinite(levels.costHigh) || !rows?.length) return;
+  const first = rows[0];
+  const last = rows.at(-1);
+  const firstTime = first.timestamp || first.date;
+  const lastTime = last.timestamp || last.date;
+  if (!firstTime || !lastTime) return;
+  const area = chart.addAreaSeries({
+    title: "大单成本区",
+    lineColor: "rgba(37, 99, 235, 0.55)",
+    topColor: "rgba(37, 99, 235, 0.18)",
+    bottomColor: "rgba(37, 99, 235, 0.18)",
+    lineWidth: 1,
+    baseValue: { type: "price", price: levels.costLow },
+    lastValueVisible: false,
+    priceLineVisible: false,
+    crosshairMarkerVisible: false
+  });
+  area.setData([
+    { time: firstTime, value: levels.costHigh },
+    { time: lastTime, value: levels.costHigh }
+  ]);
+}
+
+function addLevelLines(series, levels, library) {
+  const dashed = library.LineStyle.Dashed;
+  [
+    ["压力区", levels.pressure, "#b7791f"],
+    ["承接区", levels.support, "#17834f"],
+    ["风险线", levels.riskInvalid, "#c2413a"]
+  ].forEach(([title, price, color]) => {
+    if (!Number.isFinite(price)) return;
+    series.createPriceLine({
+      price,
+      color,
+      lineWidth: 1,
+      lineStyle: dashed,
+      axisLabelVisible: true,
+      title
+    });
+  });
+}
+
+function missingLevelText(levels) {
+  const missing = [];
+  if (!Number.isFinite(levels.costLow) || !Number.isFinite(levels.costHigh)) missing.push("成本区");
+  if (!Number.isFinite(levels.pressure)) missing.push("压力区");
+  if (!Number.isFinite(levels.support)) missing.push("承接区");
+  if (!Number.isFinite(levels.riskInvalid)) missing.push("风险线");
+  return missing.length ? ` · ${missing.join("、")}待确认` : "";
+}
+
+async function loadWatchDetail(code) {
+  state.selectedWatchCode = code;
+  renderWatchTable();
+  openWatchDetailModal();
+  els.watchDetailTitle.textContent = "盯盘详情加载中";
+  els.watchDetailMeta.textContent = "正在读取统一榜单、热度分析和起爆信号";
+  els.watchDetailBadge.textContent = code;
+  els.watchDetailCards.innerHTML = "";
+  prepareChartPanel("watch", "图表等待详情数据");
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 35_000);
+  try {
+    const response = await fetch(`${API_BASE}/api/watchlist-detail?code=${encodeURIComponent(code)}&period=${state.watchPeriod}`, {
+      cache: "no-store",
+      signal: controller.signal
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "请求失败");
+    renderWatchDetail(payload.row, payload.detail);
+    loadStockCharts("watch", payload.row);
+  } catch (error) {
+    els.watchDetailTitle.textContent = "盯盘详情";
+    els.watchDetailMeta.textContent = error.name === "AbortError" ? "盯盘详情请求超时" : error.message;
+    detailChartElements("watch").state.textContent = "图表待确认";
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+function openWatchDetailModal() {
+  els.watchDetailModal.hidden = false;
+  document.body.classList.add("modal-open");
+  els.watchDetailClose.focus();
+}
+
+function closeWatchDetailModal() {
+  clearDetailCharts("watch");
+  els.watchDetailModal.hidden = true;
+  document.body.classList.remove("modal-open");
+}
+
+function renderWatchDetail(row, detail) {
+  const hot = detail.hot;
+  const breakout = detail.breakout;
+  els.watchDetailTitle.textContent = `${row.name} · ${row.sourceType}`;
+  els.watchDetailMeta.textContent = `${detail.confluence} ${row.watchNote}`;
+  els.watchDetailBadge.textContent = `${fixed(row.watchScore, 1)} 分`;
+  const hotCards = hot ? `
+    <div class="detail-card">
+      <span>热度榜表现</span>
+      <strong>${hot.heat}</strong>
+    </div>
+    <div class="detail-card">
+      <span>暗盘资金承接</span>
+      <strong>${hot.flow}</strong>
+    </div>
+    <div class="detail-card">
+      <span>所属板块强度</span>
+      <strong>${hot.sector}</strong>
+    </div>
+    <div class="detail-card">
+      <span>龙头定位</span>
+      <strong>${hot.leader}</strong>
+    </div>
+    <div class="detail-card wide-card">
+      <span>AI股票分析</span>
+      <strong>${hot.aiAnalysis}</strong>
+    </div>
+    <div class="detail-card wide-card">
+      <span>风险诊断</span>
+      <strong>${hot.riskDiagnosis}</strong>
+    </div>
+    <div class="detail-card">
+      <span>大单成本区</span>
+      <strong>${hot.chipCost}</strong>
+    </div>
+    <div class="detail-card">
+      <span>上方压力区</span>
+      <strong>${hot.chipPressure}</strong>
+    </div>
+    <div class="detail-card">
+      <span>下方承接区</span>
+      <strong>${hot.chipSupport}</strong>
+    </div>
+    <div class="detail-card wide-card">
+      <span>价格相对主力成本位置</span>
+      <strong>${hot.chipPosition}</strong>
+    </div>
+  ` : "";
+  const breakoutCards = breakout ? `
+    <div class="detail-card wide-card">
+      <span>起爆理由</span>
+      <strong>${breakout.reason || "待确认"}</strong>
+    </div>
+    <div class="detail-card">
+      <span>起爆阶段</span>
+      <strong>${breakout.stage || "待确认"}</strong>
+    </div>
+    <div class="detail-card">
+      <span>量能/热度/承接</span>
+      <strong>${fixed(breakout.volumeScore, 1)} / ${fixed(breakout.heatScore, 1)} / ${fixed(breakout.carryScore, 1)}</strong>
+    </div>
+    <div class="detail-card">
+      <span>板块共振</span>
+      <strong>${fixed(breakout.sectorScore, 1)} 分 · ${row.sectorName}</strong>
+    </div>
+  ` : "";
+  els.watchDetailCards.innerHTML = `
+    <div class="detail-card wide-card">
+      <span>共振结论</span>
+      <strong>${detail.confluence}</strong>
+    </div>
+    <div class="detail-card">
+      <span>来源标签</span>
+      <strong>${(row.tags || []).join(" / ") || "待确认"}</strong>
+    </div>
+    <div class="detail-card">
+      <span>盯盘分</span>
+      <strong>${fixed(row.watchScore, 2)} · ${row.grade}</strong>
+    </div>
+    <div class="detail-card">
+      <span>热度与涨幅</span>
+      <strong>热度${Number.isFinite(row.heatRank) ? `第${row.heatRank}` : "待确认"} · 涨幅${pct(row.changePct)}</strong>
+    </div>
+    <div class="detail-card">
+      <span>DDE / 大单总额</span>
+      <strong>${money(row.ddeNetAmount)} · ${money(row.largeOrderAmount)}</strong>
+    </div>
+    ${hotCards}
+    ${breakoutCards}
+    <div class="detail-card wide-card">
+      <span>买点条件</span>
+      <strong>${row.buyPointCondition || row.entryCondition || "待确认"}</strong>
+    </div>
+    <div class="detail-card">
+      <span>风险线</span>
+      <strong>${row.riskLine || "待确认"}</strong>
+    </div>
+    <div class="detail-card wide-card">
+      <span>失效条件</span>
+      <strong>${row.invalidCondition || "待确认"}</strong>
+    </div>
+  `;
 }
 
 async function loadHotDetail(code) {
@@ -735,6 +1471,7 @@ async function loadHotDetail(code) {
   els.hotDetailMeta.textContent = "正在读取热度榜和承接条件";
   els.hotDetailBadge.textContent = code;
   els.hotDetailCards.innerHTML = "";
+  prepareChartPanel("hot", "图表等待详情数据");
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), 30_000);
   try {
@@ -745,9 +1482,11 @@ async function loadHotDetail(code) {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "请求失败");
     renderHotDetail(payload.row, payload.detail);
+    loadStockCharts("hot", payload.row);
   } catch (error) {
     els.hotDetailTitle.textContent = "热度龙头详情";
     els.hotDetailMeta.textContent = error.name === "AbortError" ? "热度详情请求超时" : error.message;
+    detailChartElements("hot").state.textContent = "图表待确认";
   } finally {
     window.clearTimeout(timeoutId);
   }
@@ -760,6 +1499,7 @@ function openHotDetailModal() {
 }
 
 function closeHotDetailModal() {
+  clearDetailCharts("hot");
   els.hotDetailModal.hidden = true;
   document.body.classList.remove("modal-open");
 }
@@ -793,6 +1533,30 @@ function renderHotDetail(row, detail) {
       <span>周期评分</span>
       <strong>${detail.period}</strong>
     </div>
+    <div class="detail-card wide-card">
+      <span>AI股票分析</span>
+      <strong>${detail.aiAnalysis}</strong>
+    </div>
+    <div class="detail-card wide-card">
+      <span>风险诊断</span>
+      <strong>${detail.riskDiagnosis}</strong>
+    </div>
+    <div class="detail-card">
+      <span>大单成本区</span>
+      <strong>${detail.chipCost}</strong>
+    </div>
+    <div class="detail-card">
+      <span>上方压力区</span>
+      <strong>${detail.chipPressure}</strong>
+    </div>
+    <div class="detail-card">
+      <span>下方承接区</span>
+      <strong>${detail.chipSupport}</strong>
+    </div>
+    <div class="detail-card wide-card">
+      <span>价格相对主力成本位置</span>
+      <strong>${detail.chipPosition}</strong>
+    </div>
     <div class="detail-card">
       <span>买点条件</span>
       <strong>${detail.entryCondition}</strong>
@@ -805,17 +1569,26 @@ function renderHotDetail(row, detail) {
       <span>失效条件</span>
       <strong>${detail.invalidCondition}</strong>
     </div>
+    <div class="detail-card wide-card">
+      <span>筹码来源</span>
+      <strong>${detail.chipSource}</strong>
+    </div>
   `;
 }
 
 function tagClass(tag) {
   if (tag === "强承接") return "strong";
+  if (tag === "大单增强") return "strong";
   if (tag === "进攻") return "attack";
   if (tag === "分歧") return "diverge";
   return "";
 }
 
 function exportCsv() {
+  if (state.view === "watch") {
+    exportWatchCsv();
+    return;
+  }
   if (state.view === "hot") {
     exportHotCsv();
     return;
@@ -824,7 +1597,7 @@ function exportCsv() {
     exportBreakoutCsv();
     return;
   }
-  const header = ["代码", "名称", "分数", "价格", "涨幅", "成交额", "量比", "振幅", "换手", "主力净额", "超大单净额", "超大单占比", "大单净额", "大单占比", "信号", "风险线"];
+  const header = ["代码", "名称", "分数", "价格", "涨幅", "成交额", "量比", "振幅", "换手", "主力净额", "超大单净额", "超大单占比", "大单净额", "大单占比", "DDE大单净额", "DDE大单净量", "大单总额", "信号", "风险线"];
   const rows = state.filteredRows.map((row) => [
     codeOf(row),
     row.name,
@@ -840,6 +1613,9 @@ function exportCsv() {
     row.superPct,
     row.largeInflow,
     row.largePct,
+    row.ddeNetAmount,
+    row.ddeNetVolume,
+    row.largeOrderAmount,
     row.tag,
     row.risk
   ]);
@@ -851,6 +1627,42 @@ function exportCsv() {
   const link = document.createElement("a");
   link.href = url;
   link.download = `a-share-dark-fund-${new Date().toISOString().slice(0, 10)}.csv`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function exportWatchCsv() {
+  const header = ["排名", "代码", "名称", "板块", "盯盘分", "来源标签", "起爆阶段", "热度排名", "雪球排名", "涨幅", "成交额", "量比", "主力净额", "超大单净额", "DDE大单净额", "DDE大单净量", "大单总额", "风险线", "买点条件", "盯盘备注"];
+  const rows = state.filteredWatchRows.map((row) => [
+    row.rank,
+    codeOf(row),
+    row.name,
+    row.sectorName,
+    row.watchScore,
+    (row.tags || []).join("/"),
+    row.breakoutStage,
+    Number.isFinite(row.heatRank) ? row.heatRank : "",
+    Number.isFinite(row.xueqiuRank) ? row.xueqiuRank : "",
+    row.changePct,
+    row.amount,
+    row.volumeRatio,
+    row.mainInflow,
+    row.superInflow,
+    row.ddeNetAmount,
+    row.ddeNetVolume,
+    row.largeOrderAmount,
+    row.riskLine,
+    row.buyPointCondition || row.entryCondition,
+    row.watchNote
+  ]);
+  const csv = [header, ...rows]
+    .map((line) => line.map((cell) => `"${String(cell ?? "").replaceAll('"', '""')}"`).join(","))
+    .join("\n");
+  const blob = new Blob([`\ufeff${csv}`], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `a-share-watchlist-${new Date().toISOString().slice(0, 10)}.csv`;
   link.click();
   URL.revokeObjectURL(url);
 }
@@ -896,7 +1708,7 @@ function exportHotCsv() {
 }
 
 function exportBreakoutCsv() {
-  const header = ["排名", "代码", "名称", "所属板块", "起爆评分", "阶段", "涨幅", "成交额", "量比", "主力净额", "超大单净额", "同花顺热度", "雪球排名", "量能分", "热度分", "承接分", "板块分", "触发理由", "风险提示", "买点条件"];
+  const header = ["排名", "代码", "名称", "所属板块", "起爆评分", "阶段", "涨幅", "成交额", "量比", "主力净额", "超大单净额", "DDE大单净额", "DDE大单净量", "大单总额", "同花顺热度", "雪球排名", "量能分", "热度分", "承接分", "板块分", "触发理由", "风险提示", "买点条件"];
   const rows = state.filteredBreakoutRows.slice(0, 50).map((row) => [
     row.rank,
     codeOf(row),
@@ -909,6 +1721,9 @@ function exportBreakoutCsv() {
     row.volumeRatio,
     row.mainInflow,
     row.superInflow,
+    row.ddeNetAmount,
+    row.ddeNetVolume,
+    row.largeOrderAmount,
     Number.isFinite(row.heatRank) ? row.heatRank : "",
     Number.isFinite(row.xueqiuRank) ? row.xueqiuRank : "",
     row.volumeScore,
@@ -945,15 +1760,26 @@ function applyMode(mode) {
 function setView(view) {
   state.view = view;
   els.trackerView.hidden = view !== "tracker";
+  els.watchView.hidden = view !== "watch";
   els.sectorView.hidden = view !== "sectors";
   els.hotView.hidden = view !== "hot";
   els.breakoutView.hidden = view !== "breakout";
   document.querySelectorAll(".view-tab").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.view === view);
   });
+  if (view === "watch" && !state.watchRows.length) refreshWatchlist();
   if (view === "sectors" && !state.sectorRows.length) refreshSectors();
   if (view === "hot" && !state.hotRows.length) refreshHotLeaders();
   if (view === "breakout" && !state.breakoutRows.length) refreshBreakouts();
+}
+
+function setWatchPeriod(period) {
+  state.watchPeriod = Number(period);
+  state.selectedWatchCode = "";
+  document.querySelectorAll(".watch-period").forEach((button) => {
+    button.classList.toggle("is-active", Number(button.dataset.watchPeriod) === state.watchPeriod);
+  });
+  refreshWatchlist();
 }
 
 function setPeriod(period) {
@@ -1008,6 +1834,10 @@ document.querySelectorAll(".period").forEach((button) => {
   button.addEventListener("click", () => setPeriod(button.dataset.period));
 });
 
+document.querySelectorAll(".watch-period").forEach((button) => {
+  button.addEventListener("click", () => setWatchPeriod(button.dataset.watchPeriod));
+});
+
 document.querySelectorAll(".hot-period").forEach((button) => {
   button.addEventListener("click", () => setHotPeriod(button.dataset.hotPeriod));
 });
@@ -1042,6 +1872,21 @@ document.querySelectorAll("th[data-hot-sort]").forEach((th) => {
   });
 });
 
+document.querySelectorAll("th[data-watch-sort]").forEach((th) => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.watchSort;
+    if (state.watchSortKey === key) {
+      state.watchSortDir = state.watchSortDir === "asc" ? "desc" : "asc";
+    } else {
+      state.watchSortKey = key;
+      state.watchSortDir = "desc";
+    }
+    applyWatchSearchAndSort();
+    renderWatchFocus();
+    renderWatchTable();
+  });
+});
+
 document.querySelectorAll("th[data-breakout-sort]").forEach((th) => {
   th.addEventListener("click", () => {
     const key = th.dataset.breakoutSort;
@@ -1068,6 +1913,26 @@ els.searchInput.addEventListener("input", () => {
   renderTable();
 });
 
+els.watchSearchInput.addEventListener("input", () => {
+  applyWatchSearchAndSort();
+  renderWatchFocus();
+  renderWatchTable();
+  els.watchState.textContent = state.filteredWatchRows.length ? "" : "没有匹配的盯盘候选";
+});
+
+document.querySelectorAll(".watch-filter").forEach((button) => {
+  button.addEventListener("click", () => {
+    state.watchFilter = button.dataset.watchFilter;
+    document.querySelectorAll(".watch-filter").forEach((item) => {
+      item.classList.toggle("is-active", item === button);
+    });
+    applyWatchSearchAndSort();
+    renderWatchFocus();
+    renderWatchTable();
+    els.watchState.textContent = state.filteredWatchRows.length ? "" : "没有匹配的盯盘候选";
+  });
+});
+
 els.sectorSearchInput.addEventListener("input", () => {
   applySectorSearchAndSort();
   renderSectorFocus();
@@ -1089,9 +1954,44 @@ els.breakoutSearchInput.addEventListener("input", () => {
   els.breakoutState.textContent = state.filteredBreakoutRows.length ? "" : "没有匹配的起爆预警";
 });
 
+[
+  els.breakoutAlertEnabled,
+  els.breakoutAlertSound,
+  els.breakoutAlertPopup,
+  els.breakoutAlertMinScore,
+  els.breakoutAlertStage
+].forEach((control) => {
+  control.addEventListener("input", () => {
+    readBreakoutAlertControls();
+    unlockBreakoutAlertSound();
+  });
+  control.addEventListener("change", () => {
+    readBreakoutAlertControls();
+    unlockBreakoutAlertSound();
+  });
+});
+
+els.breakoutAlertTest.addEventListener("click", () => {
+  unlockBreakoutAlertSound();
+  playBreakoutAlertSound();
+  showToast("起爆警报提示音已试听");
+});
+
 els.sectorFocusList.addEventListener("click", (event) => {
   const card = event.target.closest(".sector-card");
   if (card) loadSectorDetail(card.dataset.code);
+});
+
+els.watchFocusList.addEventListener("click", (event) => {
+  const card = event.target.closest(".watch-card");
+  if (card) loadWatchDetail(card.dataset.code);
+});
+
+els.watchFocusList.addEventListener("keydown", (event) => {
+  const card = event.target.closest(".watch-card");
+  if (!card || (event.key !== "Enter" && event.key !== " ")) return;
+  event.preventDefault();
+  loadWatchDetail(card.dataset.code);
 });
 
 els.hotFocusList.addEventListener("click", (event) => {
@@ -1111,6 +2011,18 @@ els.sectorRowsBody.addEventListener("click", (event) => {
   if (row) loadSectorDetail(row.dataset.code);
 });
 
+els.watchRowsBody.addEventListener("click", (event) => {
+  const row = event.target.closest(".watch-row");
+  if (row) loadWatchDetail(row.dataset.code);
+});
+
+els.watchRowsBody.addEventListener("keydown", (event) => {
+  const row = event.target.closest(".watch-row");
+  if (!row || (event.key !== "Enter" && event.key !== " ")) return;
+  event.preventDefault();
+  loadWatchDetail(row.dataset.code);
+});
+
 els.hotRowsBody.addEventListener("click", (event) => {
   const row = event.target.closest(".hot-row");
   if (row) loadHotDetail(row.dataset.code);
@@ -1123,18 +2035,34 @@ els.hotRowsBody.addEventListener("keydown", (event) => {
   loadHotDetail(row.dataset.code);
 });
 
+els.watchDetailClose.addEventListener("click", closeWatchDetailModal);
+
+els.watchDetailModal.addEventListener("click", (event) => {
+  if (event.target === els.watchDetailModal) closeWatchDetailModal();
+});
+
 els.hotDetailClose.addEventListener("click", closeHotDetailModal);
 
 els.hotDetailModal.addEventListener("click", (event) => {
   if (event.target === els.hotDetailModal) closeHotDetailModal();
 });
 
+els.breakoutAlertClose.addEventListener("click", closeBreakoutAlertModal);
+
+els.breakoutAlertModal.addEventListener("click", (event) => {
+  if (event.target === els.breakoutAlertModal) closeBreakoutAlertModal();
+});
+
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !els.watchDetailModal.hidden) closeWatchDetailModal();
   if (event.key === "Escape" && !els.hotDetailModal.hidden) closeHotDetailModal();
+  if (event.key === "Escape" && !els.breakoutAlertModal.hidden) closeBreakoutAlertModal();
 });
 
 els.refreshBtn.addEventListener("click", refresh);
 els.exportBtn.addEventListener("click", exportCsv);
 
+loadBreakoutAlertSettings();
+syncBreakoutAlertControls();
 updateOutputs();
 refresh();

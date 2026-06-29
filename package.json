@@ -4,5 +4,7 @@
     "dev": "node server.js",
     "test": "node --test"
   },
-  "dependencies": {}
+  "dependencies": {
+    "lightweight-charts": "4.2.3"
+  }
 }

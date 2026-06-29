@@ -21,6 +21,7 @@
 
       <nav class="view-tabs" aria-label="功能模块">
         <button class="view-tab is-active" type="button" data-view="tracker">暗盘筛选</button>
+        <button class="view-tab" type="button" data-view="watch">盯盘总榜</button>
         <button class="view-tab" type="button" data-view="sectors">板块轮动</button>
         <button class="view-tab" type="button" data-view="hot">热度龙头</button>
         <button class="view-tab" type="button" data-view="breakout">起爆预警</button>
@@ -111,6 +112,8 @@
                 <th data-sort="mainInflow">主力净额</th>
                 <th data-sort="superPct">超大单</th>
                 <th data-sort="largePct">大单</th>
+                <th data-sort="ddeNetAmount">DDE大单</th>
+                <th data-sort="largeOrderAmount">大单总额</th>
                 <th>信号</th>
                 <th>风险线</th>
               </tr>
@@ -119,6 +122,136 @@
           </table>
         </div>
       </section>
+      </div>
+
+      <div id="watchView" hidden>
+        <section class="control-band" aria-label="盯盘总榜参数">
+          <div class="section-head compact">
+            <div>
+              <h2>盯盘总榜</h2>
+              <p id="watchTimestamp">等待刷新</p>
+            </div>
+            <span id="watchSourceBadge">热度 + 起爆 + 资金承接</span>
+          </div>
+          <div class="mode-group period-group" role="tablist" aria-label="盯盘周期">
+            <button class="watch-period is-active" type="button" data-watch-period="1">今日</button>
+            <button class="watch-period" type="button" data-watch-period="3">3日</button>
+            <button class="watch-period" type="button" data-watch-period="5">5日</button>
+          </div>
+          <div class="alert-settings" aria-label="起爆警报设置">
+            <label class="toggle-row">
+              <input id="breakoutAlertEnabled" type="checkbox">
+              <span>启用起爆警报</span>
+            </label>
+            <label class="toggle-row">
+              <input id="breakoutAlertSound" type="checkbox" checked>
+              <span>声音</span>
+            </label>
+            <label class="toggle-row">
+              <input id="breakoutAlertPopup" type="checkbox" checked>
+              <span>弹窗</span>
+            </label>
+            <label>
+              <span>评分阈值</span>
+              <input id="breakoutAlertMinScore" type="range" min="45" max="90" step="1" value="78">
+              <output id="breakoutAlertMinScoreOut">78</output>
+            </label>
+            <label>
+              <span>触发阶段</span>
+              <select id="breakoutAlertStage" aria-label="触发阶段">
+                <option value="刚起爆">刚起爆</option>
+                <option value="升温">升温及以上</option>
+                <option value="观察">观察及以上</option>
+              </select>
+            </label>
+            <button id="breakoutAlertTest" type="button" title="试听提示音">试听</button>
+          </div>
+          <div class="mode-group watch-filter-group" role="tablist" aria-label="盯盘筛选">
+            <button class="watch-filter is-active" type="button" data-watch-filter="all">全部</button>
+            <button class="watch-filter" type="button" data-watch-filter="confluence">双榜共振</button>
+            <button class="watch-filter" type="button" data-watch-filter="freshBreakout">刚起爆</button>
+            <button class="watch-filter" type="button" data-watch-filter="strong">强关注</button>
+            <button class="watch-filter" type="button" data-watch-filter="positive">资金双正</button>
+            <button class="watch-filter" type="button" data-watch-filter="hotOnly">仅热度</button>
+            <button class="watch-filter" type="button" data-watch-filter="breakoutOnly">仅起爆</button>
+            <button class="watch-filter" type="button" data-watch-filter="new">只看新信号</button>
+          </div>
+        </section>
+
+        <section class="metrics watch-metrics" aria-label="盯盘总榜统计">
+          <div class="metric">
+            <span>总候选</span>
+            <strong id="watchCount">--</strong>
+          </div>
+          <div class="metric">
+            <span>双榜共振</span>
+            <strong id="watchConfluenceCount">--</strong>
+          </div>
+          <div class="metric">
+            <span>刚起爆</span>
+            <strong id="watchBreakoutCount">--</strong>
+          </div>
+          <div class="metric">
+            <span>强关注</span>
+            <strong id="watchStrongCount">--</strong>
+          </div>
+          <div class="metric">
+            <span>资金双正</span>
+            <strong id="watchPositiveFlow">--</strong>
+          </div>
+          <div class="metric">
+            <span>平均盯盘分</span>
+            <strong id="watchAvgScore">--</strong>
+          </div>
+        </section>
+
+        <section class="focus" aria-label="盯盘重点">
+          <div class="section-head">
+            <div>
+              <h2>今日最该盯</h2>
+              <p>按盯盘优先排序，点击个股模块查看热度、起爆、承接和风险线</p>
+            </div>
+            <input id="watchSearchInput" type="search" placeholder="搜索代码、名称或板块" aria-label="搜索代码、名称或板块">
+          </div>
+          <div id="watchFocusList" class="focus-list watch-focus-list"></div>
+          <div id="watchState" class="state-line" role="status"></div>
+        </section>
+
+        <section class="table-section" aria-label="盯盘总榜排行榜">
+          <div class="section-head">
+            <div>
+              <h2>统一候选池</h2>
+              <p>盯盘分 = 热度 + 起爆 + 资金承接 + 风险收益，双榜共振优先</p>
+            </div>
+          </div>
+          <div class="table-wrap watch-table-wrap">
+            <table class="watch-table">
+              <thead>
+                <tr>
+                  <th data-watch-sort="rank">排名</th>
+                  <th data-watch-sort="code">代码</th>
+                  <th data-watch-sort="name">名称</th>
+                  <th data-watch-sort="sectorName">板块</th>
+                  <th data-watch-sort="watchScore">盯盘分</th>
+                  <th data-watch-sort="sourceType">来源标签</th>
+                  <th data-watch-sort="breakoutStage">起爆阶段</th>
+                  <th data-watch-sort="heatRank">热度排名</th>
+                  <th data-watch-sort="xueqiuRank">雪球排名</th>
+                  <th data-watch-sort="changePct">涨跌幅</th>
+                  <th data-watch-sort="amount">成交额</th>
+                  <th data-watch-sort="volumeRatio">量比</th>
+                  <th data-watch-sort="mainInflow">主力</th>
+                  <th data-watch-sort="superInflow">超大单</th>
+                  <th data-watch-sort="ddeNetAmount">DDE大单</th>
+                  <th data-watch-sort="largeOrderAmount">大单总额</th>
+                  <th>风险线</th>
+                  <th>盯盘备注</th>
+                </tr>
+              </thead>
+              <tbody id="watchRowsBody"></tbody>
+            </table>
+          </div>
+        </section>
       </div>
 
       <div id="sectorView" hidden>
@@ -216,8 +349,8 @@
           <div class="news-panel">
             <div class="section-head compact">
               <div>
-                <h2>利好消息</h2>
-                <p>匹配板块名称、核心个股和热门概念关键词</p>
+                <h2>热点事件解读</h2>
+                <p>匹配最近一周板块事件、核心个股和热门概念关键词</p>
               </div>
             </div>
             <div id="sectorNewsList" class="news-list"></div>
@@ -237,6 +370,8 @@
                   <th>主力净额</th>
                   <th>超大单</th>
                   <th>大单</th>
+                  <th>DDE大单</th>
+                  <th>大单总额</th>
                   <th>信号</th>
                   <th>风险线</th>
                 </tr>
@@ -429,6 +564,8 @@
                   <th data-breakout-sort="volumeRatio">量比</th>
                   <th data-breakout-sort="mainInflow">主力净流入</th>
                   <th data-breakout-sort="superInflow">超大单净流入</th>
+                  <th data-breakout-sort="ddeNetAmount">DDE大单</th>
+                  <th data-breakout-sort="largeOrderAmount">大单总额</th>
                   <th data-breakout-sort="heatRank">同花顺热度</th>
                   <th data-breakout-sort="xueqiuRank">雪球排名</th>
                   <th data-breakout-sort="volumeScore">量能分</th>
@@ -447,6 +584,38 @@
       </div>
     </main>
 
+    <div id="watchDetailModal" class="modal-backdrop" hidden>
+      <section class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="watchDetailTitle">
+        <div class="section-head">
+          <div>
+            <h2 id="watchDetailTitle">盯盘详情</h2>
+            <p id="watchDetailMeta">选择一只股票查看热度、起爆、承接和风险线</p>
+          </div>
+          <div class="modal-actions">
+            <span id="watchDetailBadge">等待选择</span>
+            <button id="watchDetailClose" type="button" aria-label="关闭盯盘详情">×</button>
+          </div>
+        </div>
+        <div id="watchChartPanel" class="stock-chart-panel" hidden>
+          <div class="chart-panel-head">
+            <strong>股价图表</strong>
+            <span id="watchChartState">图表待加载</span>
+          </div>
+          <div class="stock-chart-grid">
+            <article class="stock-chart-card intraday-chart-card">
+              <div class="chart-title">分时图 · 价格 / 均线</div>
+              <div id="watchIntradayChart" class="stock-chart"></div>
+            </article>
+            <article class="stock-chart-card daily-chart-card">
+              <div class="chart-title">日K线 · EMA5 / EMA10 / EMA20</div>
+              <div id="watchDailyChart" class="stock-chart"></div>
+            </article>
+          </div>
+        </div>
+        <div id="watchDetailCards" class="detail-grid hot-detail-grid"></div>
+      </section>
+    </div>
+
     <div id="hotDetailModal" class="modal-backdrop" hidden>
       <section class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="hotDetailTitle">
         <div class="section-head">
@@ -459,7 +628,39 @@
             <button id="hotDetailClose" type="button" aria-label="关闭热度龙头详情">×</button>
           </div>
         </div>
+        <div id="hotChartPanel" class="stock-chart-panel" hidden>
+          <div class="chart-panel-head">
+            <strong>股价图表</strong>
+            <span id="hotChartState">图表待加载</span>
+          </div>
+          <div class="stock-chart-grid">
+            <article class="stock-chart-card intraday-chart-card">
+              <div class="chart-title">分时图 · 价格 / 均线</div>
+              <div id="hotIntradayChart" class="stock-chart"></div>
+            </article>
+            <article class="stock-chart-card daily-chart-card">
+              <div class="chart-title">日K线 · EMA5 / EMA10 / EMA20</div>
+              <div id="hotDailyChart" class="stock-chart"></div>
+            </article>
+          </div>
+        </div>
         <div id="hotDetailCards" class="detail-grid hot-detail-grid"></div>
+      </section>
+    </div>
+
+    <div id="breakoutAlertModal" class="modal-backdrop" hidden>
+      <section class="modal-panel alert-modal-panel" role="alertdialog" aria-modal="true" aria-labelledby="breakoutAlertTitle">
+        <div class="section-head">
+          <div>
+            <h2 id="breakoutAlertTitle">起爆信号警报</h2>
+            <p id="breakoutAlertMeta">检测到符合条件的起爆预警</p>
+          </div>
+          <div class="modal-actions">
+            <span id="breakoutAlertBadge">等待信号</span>
+            <button id="breakoutAlertClose" type="button" aria-label="关闭起爆警报">×</button>
+          </div>
+        </div>
+        <div id="breakoutAlertList" class="alert-list"></div>
       </section>
     </div>
 

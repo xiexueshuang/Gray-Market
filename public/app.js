@@ -1122,6 +1122,7 @@ function detailChartElements(scope) {
 
 function clearDetailCharts(scope) {
   state.detailCharts[scope].forEach((item) => {
+    item.cleanup?.forEach((cleanup) => cleanup());
     item.observer?.disconnect();
     item.chart?.remove();
   });
@@ -1178,7 +1179,6 @@ function renderStockCharts(scope, payload, library) {
 
 function renderIntradayChart(scope, container, payload, library) {
   const chart = createBaseChart(container, library);
-  addCostZoneArea(chart, payload.levels || {}, payload.intraday, library);
   const priceSeries = chart.addLineSeries({ color: "#c2413a", lineWidth: 2, title: "价格" });
   priceSeries.setData(payload.intraday.map((point) => ({ time: point.timestamp, value: point.price })));
   const averageData = payload.intraday
@@ -1195,13 +1195,12 @@ function renderIntradayChart(scope, container, payload, library) {
     averageSeries.setData(averageData);
   }
   addLevelLines(priceSeries, payload.levels || {}, library);
-  trackChartResize(scope, chart, container);
   chart.timeScale().fitContent();
+  trackChartResize(scope, chart, container);
 }
 
 function renderDailyChart(scope, container, payload, library) {
   const chart = createBaseChart(container, library);
-  addCostZoneArea(chart, payload.levels || {}, payload.daily, library);
   const candleSeries = chart.addCandlestickSeries({
     upColor: "#c2413a",
     downColor: "#17834f",
@@ -1217,6 +1216,7 @@ function renderDailyChart(scope, container, payload, library) {
     low: point.low,
     close: point.close
   })));
+  const emaSeries = [];
   [
     ["EMA5", payload.movingAverages?.ma5 || [], "#2563eb"],
     ["EMA10", payload.movingAverages?.ma10 || [], "#b7791f"],
@@ -1226,15 +1226,19 @@ function renderDailyChart(scope, container, payload, library) {
     const series = chart.addLineSeries({
       color,
       lineWidth: 1,
-      title,
+      title: "",
       lastValueVisible: false,
       priceLineVisible: false
     });
     series.setData(data);
+    series.applyOptions({ title: "", lastValueVisible: false, priceLineVisible: false });
+    emaSeries.push({ title, color, series });
   });
   addLevelLines(candleSeries, payload.levels || {}, library);
-  trackChartResize(scope, chart, container);
   chart.timeScale().fitContent();
+  const updateCostZone = addCostZoneOverlay(chart, container, candleSeries, payload.levels || {});
+  const cleanupEmaLegend = addEmaHoverLegend(chart, container, emaSeries);
+  trackChartResize(scope, chart, container, [updateCostZone], [cleanupEmaLegend]);
 }
 
 function createBaseChart(container, library) {
@@ -1255,39 +1259,74 @@ function createBaseChart(container, library) {
   });
 }
 
-function trackChartResize(scope, chart, container) {
+function trackChartResize(scope, chart, container, updateCallbacks = [], cleanupCallbacks = []) {
   const observer = new ResizeObserver(() => {
     chart.applyOptions({
       width: Math.max(container.clientWidth, 320),
       height: Math.max(container.clientHeight, 360)
     });
+    window.requestAnimationFrame(() => updateCallbacks.forEach((callback) => callback()));
   });
   observer.observe(container);
-  state.detailCharts[scope].push({ chart, observer });
+  const rangeHandler = () => {
+    window.requestAnimationFrame(() => updateCallbacks.forEach((callback) => callback()));
+  };
+  chart.timeScale().subscribeVisibleLogicalRangeChange(rangeHandler);
+  window.requestAnimationFrame(() => updateCallbacks.forEach((callback) => callback()));
+  state.detailCharts[scope].push({
+    chart,
+    observer,
+    cleanup: [
+      () => chart.timeScale().unsubscribeVisibleLogicalRangeChange(rangeHandler),
+      ...cleanupCallbacks
+    ]
+  });
 }
 
-function addCostZoneArea(chart, levels, rows, library) {
-  if (!Number.isFinite(levels.costLow) || !Number.isFinite(levels.costHigh) || !rows?.length) return;
-  const first = rows[0];
-  const last = rows.at(-1);
-  const firstTime = first.timestamp || first.date;
-  const lastTime = last.timestamp || last.date;
-  if (!firstTime || !lastTime) return;
-  const area = chart.addAreaSeries({
-    title: "大单成本区",
-    lineColor: "rgba(37, 99, 235, 0.55)",
-    topColor: "rgba(37, 99, 235, 0.18)",
-    bottomColor: "rgba(37, 99, 235, 0.18)",
-    lineWidth: 1,
-    baseValue: { type: "price", price: levels.costLow },
-    lastValueVisible: false,
-    priceLineVisible: false,
-    crosshairMarkerVisible: false
-  });
-  area.setData([
-    { time: firstTime, value: levels.costHigh },
-    { time: lastTime, value: levels.costHigh }
-  ]);
+function addCostZoneOverlay(chart, container, series, levels) {
+  if (!Number.isFinite(levels.costLow) || !Number.isFinite(levels.costHigh)) return () => {};
+  const low = Math.min(levels.costLow, levels.costHigh);
+  const high = Math.max(levels.costLow, levels.costHigh);
+  const zone = document.createElement("div");
+  zone.className = "chart-cost-zone";
+  zone.innerHTML = `<span>大单成本区 ${low.toFixed(2)}-${high.toFixed(2)}</span>`;
+  container.appendChild(zone);
+
+  return () => {
+    const topCoordinate = series.priceToCoordinate(high);
+    const bottomCoordinate = series.priceToCoordinate(low);
+    if (!Number.isFinite(topCoordinate) || !Number.isFinite(bottomCoordinate)) {
+      zone.hidden = true;
+      return;
+    }
+    const top = Math.min(topCoordinate, bottomCoordinate);
+    const bottom = Math.max(topCoordinate, bottomCoordinate);
+    const rightScaleWidth = chart.priceScale("right")?.width?.() || 0;
+    zone.hidden = false;
+    zone.style.top = `${top}px`;
+    zone.style.height = `${Math.max(bottom - top, 4)}px`;
+    zone.style.right = `${rightScaleWidth}px`;
+  };
+}
+
+function addEmaHoverLegend(chart, container, emaSeries) {
+  if (!emaSeries.length) return () => {};
+  const legend = document.createElement("div");
+  legend.className = "chart-inline-legend";
+  legend.innerHTML = `
+    ${emaSeries.map((item) => `<span style="--legend-color: ${item.color}">${item.title}</span>`).join("")}
+    <strong></strong>
+  `;
+  const valueEl = legend.querySelector("strong");
+  container.appendChild(legend);
+  const handler = (param) => {
+    const hovered = emaSeries.find((item) => item.series === param.hoveredSeries);
+    const point = hovered ? param.seriesData.get(hovered.series) : null;
+    const value = point?.value;
+    valueEl.textContent = Number.isFinite(value) ? `${hovered.title} ${value.toFixed(2)}` : "";
+  };
+  chart.subscribeCrosshairMove(handler);
+  return () => chart.unsubscribeCrosshairMove(handler);
 }
 
 function addLevelLines(series, levels, library) {

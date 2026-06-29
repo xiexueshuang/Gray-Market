@@ -708,9 +708,17 @@ test("watchlist page exposes merged list, filters, detail modal, and CSV export"
   assert.match(app, /function loadStockCharts/);
   assert.match(app, /\/api\/stock-chart\?code=/);
   assert.match(app, /createPriceLine/);
-  assert.match(app, /function addCostZoneArea/);
+  assert.match(app, /function addCostZoneOverlay/);
+  assert.match(app, /function addEmaHoverLegend/);
+  assert.match(app, /subscribeCrosshairMove/);
+  const intradayChartCode = app.match(/function renderIntradayChart[\s\S]*?function renderDailyChart/)?.[0] || "";
+  const dailyChartCode = app.match(/function renderDailyChart[\s\S]*?function createBaseChart/)?.[0] || "";
+  assert.doesNotMatch(intradayChartCode, /addCostZoneOverlay/);
+  assert.match(dailyChartCode, /addCostZoneOverlay/);
   assert.match(app, /priceLineVisible: false/);
   assert.match(app, /lastValueVisible: false/);
+  assert.match(css, /chart-cost-zone/);
+  assert.match(css, /chart-inline-legend/);
   assert.match(css, /width: min\(1760px, calc\(100vw - 20px\)\)/);
   assert.match(css, /grid-template-columns: 1fr/);
   assert.match(css, /daily-chart-card \.stock-chart/);

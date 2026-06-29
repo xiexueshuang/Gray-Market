@@ -14,6 +14,21 @@
           <h1>A股暗盘资金追踪器</h1>
         </div>
         <div class="actions">
+          <div class="refresh-controls" aria-label="行情刷新状态">
+            <label class="auto-refresh-toggle">
+              <input id="autoRefreshToggle" type="checkbox" checked>
+              <span>自动刷新</span>
+            </label>
+            <select id="autoRefreshInterval" aria-label="自动刷新频率">
+              <option value="30000">30秒</option>
+              <option value="60000" selected>60秒</option>
+              <option value="120000">120秒</option>
+              <option value="180000">180秒</option>
+              <option value="300000">5分钟</option>
+            </select>
+            <span id="autoRefreshStatus">等待首次刷新</span>
+            <span id="dataStatusBadge" class="data-status-badge">数据状态待确认</span>
+          </div>
           <button id="refreshBtn" class="primary" type="button" title="刷新行情">↻ 刷新</button>
           <button id="exportBtn" type="button" title="导出候选池">↓ CSV</button>
         </div>

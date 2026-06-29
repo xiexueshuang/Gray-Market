@@ -12,6 +12,9 @@ const CACHE_DIR = path.join(__dirname, ".cache");
 const FRESH_CACHE_MS = 10_000;
 const STALE_CACHE_MS = 5 * 60_000;
 const DISK_CACHE_MS = 24 * 60 * 60_000;
+const REFRESH_ACTIVE_MS = 60_000;
+const REFRESH_LUNCH_MS = 3 * 60_000;
+const REFRESH_CLOSED_MS = 5 * 60_000;
 const HOT_LEADER_CACHE_NAME = "hot-leaders-v3";
 const DATA_PROVIDER = String(process.env.MARKET_DATA_PROVIDER || "hithink").toLowerCase();
 const HITHINK_ASTOCK_CLI = resolveHithinkAstockCli();
@@ -1107,6 +1110,7 @@ async function breakoutAlerts(url) {
     timestamp: new Date().toLocaleString("zh-CN", { hour12: false, timeZoneName: "short" }),
     source: `${marketSource(market)} + 同花顺/雪球热度参考 + 股票级板块映射`,
     warning: marketWarning(market, "行情源"),
+    dataState: dataStateFromCache(market, "起爆预警"),
     stats,
     rows
   };
@@ -1318,6 +1322,7 @@ async function scan(url) {
     timestamp: new Date().toLocaleString("zh-CN", { hour12: false, timeZoneName: "short" }),
     source: marketSource(market),
     warning: marketWarning(market, "行情源"),
+    dataState: dataStateFromCache(market, "暗盘筛选"),
     params,
     stats,
     rows
@@ -1363,6 +1368,7 @@ async function sectors(url) {
     timestamp: new Date().toLocaleString("zh-CN", { hour12: false, timeZoneName: "short" }),
     source: boardMarket.source || (boardMarket.cacheStatus === "synthetic" ? "股票级板块映射 · fallback" : boardMarket.cacheStatus === "stale" ? "Eastmoney board quote API · cached fallback" : boardMarket.cacheStatus === "disk" ? "Eastmoney board quote API · disk cache" : "Eastmoney board quote API"),
     warning: boardMarket.warning || (boardMarket.cacheStatus === "stale" || boardMarket.cacheStatus === "disk" ? `板块行情源连接中断，已显示 ${Math.round(boardMarket.ageMs / 1000)} 秒前缓存` : ""),
+    dataState: dataStateFromCache(boardMarket, "板块轮动"),
     period,
     stats,
     rows: sorted
@@ -1426,6 +1432,7 @@ async function hotLeaders(url) {
     timestamp: new Date().toLocaleString("zh-CN", { hour12: false, timeZoneName: "short" }),
     source: payload.source,
     warning: payload.warning,
+    dataState: payload.dataState,
     period,
     stats: payload.stats,
     rows: payload.rows
@@ -1460,6 +1467,7 @@ async function buildHotLeaderRows(period, limit) {
   return {
     source: xueqiu.enabled ? `${sourceBase} + 雪球热股榜` : sourceBase,
     warning,
+    dataState: dataStateFromCache(hotMarket, "热度龙头"),
     period,
     stats,
     rows
@@ -1514,6 +1522,7 @@ async function watchlist(url) {
 
 async function buildWatchlistPayload(period, limit) {
   const warnings = [];
+  const dataStates = [];
   let hotRows = [];
   let hotSource = "同花顺问财 OpenAPI · 个股热度排名";
   let hotStats = {};
@@ -1522,6 +1531,7 @@ async function buildWatchlistPayload(period, limit) {
     hotRows = hotPayload.rows;
     hotSource = hotPayload.source;
     hotStats = hotPayload.stats;
+    if (hotPayload.dataState) dataStates.push(hotPayload.dataState);
     if (hotPayload.warning) warnings.push(hotPayload.warning);
   } catch (error) {
     warnings.push(`热度榜暂不可用：${compactError(error.message)}`);
@@ -1536,6 +1546,7 @@ async function buildWatchlistPayload(period, limit) {
     const hotRefs = new Map(hotRows.map((row) => [row.code, row]));
     breakoutRows = makeBreakoutAlertRows(rawRows, hotRefs, 120).filter(isWatchlistBreakoutStage);
     marketSourceText = `${marketSource(market)} + 股票级板块映射`;
+    dataStates.push(dataStateFromCache(market, "行情源"));
     const warning = marketWarning(market, "行情源");
     if (warning) warnings.push(warning);
   } catch (error) {
@@ -1558,6 +1569,7 @@ async function buildWatchlistPayload(period, limit) {
     timestamp: new Date().toLocaleString("zh-CN", { hour12: false, timeZoneName: "short" }),
     source: `${hotSource} + ${marketSourceText}`,
     warning: [...new Set(warnings.filter(Boolean))].join("；"),
+    dataState: combineDataStates(dataStates, "盯盘总榜"),
     period,
     stats,
     rows
@@ -2183,6 +2195,106 @@ function marketWarning(market, label) {
     return `${label}连接中断，已显示 ${Math.round(market.ageMs / 1000)} 秒前缓存`;
   }
   return "";
+}
+
+function marketSession(now = new Date()) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Shanghai",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).formatToParts(now).map((part) => [part.type, part.value]));
+  const weekday = parts.weekday;
+  const hour = Number(parts.hour);
+  const minute = Number(parts.minute);
+  const minutes = hour * 60 + minute;
+  const tradingDay = !["Sat", "Sun"].includes(weekday);
+  if (!tradingDay) return { phase: "closed", text: "非交易日", suggestedRefreshMs: REFRESH_CLOSED_MS };
+  if (minutes >= 9 * 60 + 15 && minutes < 9 * 60 + 30) {
+    return { phase: "preopen", text: "集合竞价", suggestedRefreshMs: REFRESH_ACTIVE_MS };
+  }
+  if ((minutes >= 9 * 60 + 30 && minutes <= 11 * 60 + 30) || (minutes >= 13 * 60 && minutes <= 15 * 60)) {
+    return { phase: "trading", text: "盘中交易", suggestedRefreshMs: REFRESH_ACTIVE_MS };
+  }
+  if (minutes > 11 * 60 + 30 && minutes < 13 * 60) {
+    return { phase: "lunch", text: "午间休市", suggestedRefreshMs: REFRESH_LUNCH_MS };
+  }
+  return { phase: "closed", text: "非交易时段", suggestedRefreshMs: REFRESH_CLOSED_MS };
+}
+
+function dataStateFromCache(source = {}, label = "数据") {
+  const normalizedStatus = normalizeCacheStatus(source.cacheStatus, source.ageMs);
+  const session = marketSession();
+  const ageMs = Math.max(0, Number(source.ageMs) || 0);
+  const stale = normalizedStatus === "stale" || normalizedStatus === "disk";
+  const severity = stale ? normalizedStatus === "disk" ? "bad" : "warn" : "good";
+  return {
+    label,
+    cacheStatus: normalizedStatus,
+    cacheStatusText: cacheStatusText(normalizedStatus),
+    severity,
+    ageMs,
+    ageText: ageText(ageMs),
+    marketPhase: session.phase,
+    marketPhaseText: session.text,
+    suggestedRefreshMs: session.suggestedRefreshMs,
+    minRefreshMs: 30_000,
+    realtimeText: stale ? "显示缓存行情" : "公开接口轮询更新",
+    quotaHint: "盘中建议60-120秒；页面隐藏暂停，午间和收盘后自动降频；服务端10秒内存缓存会合并重复请求"
+  };
+}
+
+function combineDataStates(states = [], label = "综合数据") {
+  const valid = states.filter(Boolean);
+  if (!valid.length) return dataStateFromCache({ cacheStatus: "live", ageMs: 0 }, label);
+  const worst = [...valid].sort((a, b) => severityRank(b.severity) - severityRank(a.severity))[0];
+  const maxAge = valid.reduce((max, item) => Math.max(max, item.ageMs || 0), 0);
+  const session = marketSession();
+  return {
+    ...worst,
+    label,
+    ageMs: maxAge,
+    ageText: ageText(maxAge),
+    marketPhase: session.phase,
+    marketPhaseText: session.text,
+    suggestedRefreshMs: Math.max(session.suggestedRefreshMs, worst.suggestedRefreshMs || REFRESH_ACTIVE_MS),
+    sources: valid.map((item) => ({ label: item.label, cacheStatus: item.cacheStatus, severity: item.severity, ageMs: item.ageMs }))
+  };
+}
+
+function normalizeCacheStatus(status, ageMs = 0) {
+  if (status === "live") return "live";
+  if (status === "fresh") return "fresh";
+  if (status === "stale") return "stale";
+  if (status === "disk") return "disk";
+  if (status === "partial") return "stale";
+  if (status === "synthetic" || status === "hithink-synthetic") return (Number(ageMs) || 0) <= FRESH_CACHE_MS ? "fresh" : "stale";
+  return "live";
+}
+
+function cacheStatusText(status) {
+  if (status === "live") return "实时更新";
+  if (status === "fresh") return "刚更新";
+  if (status === "stale") return "缓存兜底";
+  if (status === "disk") return "磁盘缓存";
+  return "状态待确认";
+}
+
+function severityRank(value) {
+  if (value === "bad") return 3;
+  if (value === "warn") return 2;
+  return 1;
+}
+
+function ageText(ms) {
+  const seconds = Math.round((Number(ms) || 0) / 1000);
+  if (seconds < 1) return "刚刚";
+  if (seconds < 60) return `${seconds}秒前`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}分钟前`;
+  const hours = Math.round(minutes / 60);
+  return `${hours}小时前`;
 }
 
 function cachePath(name) {
@@ -3494,6 +3606,8 @@ module.exports = {
   buildAiStockDiagnosis,
   buildRuleSectorInterpretation,
   normalizeSectorInterpretation,
+  dataStateFromCache,
+  combineDataStates,
   attachOneDayFlows,
   extractNewsItems,
   buildSyntheticBoardPayload

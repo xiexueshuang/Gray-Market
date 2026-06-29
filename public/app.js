@@ -39,11 +39,21 @@ const state = {
   detailCharts: {
     watch: [],
     hot: []
+  },
+  refresh: {
+    inFlight: false,
+    autoEnabled: true,
+    intervalMs: 60_000,
+    timer: null,
+    nextDueAt: 0,
+    lastDataState: null,
+    lastRefreshAt: 0
   }
 };
 
 const API_BASE = window.location.protocol === "file:" ? "http://localhost:4173" : "";
 const BREAKOUT_ALERT_STORAGE_KEY = "grayMarket.breakoutAlertSettings";
+const AUTO_REFRESH_STORAGE_KEY = "grayMarket.autoRefreshSettings";
 const LIGHTWEIGHT_CHARTS_SRC = `${API_BASE}/vendor/lightweight-charts.standalone.production.js`;
 const BREAKOUT_STAGE_RANK = {
   "观察": 1,
@@ -63,6 +73,10 @@ const modes = {
 const els = {
   refreshBtn: document.querySelector("#refreshBtn"),
   exportBtn: document.querySelector("#exportBtn"),
+  autoRefreshToggle: document.querySelector("#autoRefreshToggle"),
+  autoRefreshInterval: document.querySelector("#autoRefreshInterval"),
+  autoRefreshStatus: document.querySelector("#autoRefreshStatus"),
+  dataStatusBadge: document.querySelector("#dataStatusBadge"),
   minAmount: document.querySelector("#minAmount"),
   minVolumeRatio: document.querySelector("#minVolumeRatio"),
   maxChange: document.querySelector("#maxChange"),
@@ -276,26 +290,148 @@ function params() {
   });
 }
 
-async function refresh() {
+function loadAutoRefreshSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(AUTO_REFRESH_STORAGE_KEY) || "{}");
+    state.refresh.autoEnabled = saved.enabled !== false;
+    state.refresh.intervalMs = Number(saved.intervalMs) || 60_000;
+  } catch {
+    state.refresh.autoEnabled = true;
+    state.refresh.intervalMs = 60_000;
+  }
+  els.autoRefreshToggle.checked = state.refresh.autoEnabled;
+  els.autoRefreshInterval.value = String(state.refresh.intervalMs);
+  updateAutoRefreshStatus();
+}
+
+function saveAutoRefreshSettings() {
+  localStorage.setItem(AUTO_REFRESH_STORAGE_KEY, JSON.stringify({
+    enabled: state.refresh.autoEnabled,
+    intervalMs: state.refresh.intervalMs
+  }));
+}
+
+function clearAutoRefreshTimer() {
+  if (state.refresh.timer) window.clearTimeout(state.refresh.timer);
+  state.refresh.timer = null;
+  state.refresh.nextDueAt = 0;
+}
+
+function scheduleAutoRefresh() {
+  clearAutoRefreshTimer();
+  updateAutoRefreshStatus();
+  if (!state.refresh.autoEnabled) return;
+  if (document.hidden) return;
+  const interval = effectiveAutoRefreshInterval();
+  state.refresh.nextDueAt = Date.now() + interval;
+  state.refresh.timer = window.setTimeout(() => {
+    refresh({ auto: true });
+  }, interval);
+  updateAutoRefreshStatus();
+}
+
+function effectiveAutoRefreshInterval() {
+  const session = clientMarketSession();
+  const selected = Number(state.refresh.intervalMs) || 60_000;
+  if (session.phase === "trading" || session.phase === "preopen") return selected;
+  if (session.phase === "lunch") return Math.max(selected, 180_000);
+  return Math.max(selected, 300_000);
+}
+
+function clientMarketSession() {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Shanghai",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).formatToParts(new Date()).map((part) => [part.type, part.value]));
+  const weekday = parts.weekday;
+  const hour = Number(parts.hour);
+  const minute = Number(parts.minute);
+  const minutes = hour * 60 + minute;
+  if (["Sat", "Sun"].includes(weekday)) return { phase: "closed", text: "非交易日" };
+  if (minutes >= 9 * 60 + 15 && minutes < 9 * 60 + 30) return { phase: "preopen", text: "集合竞价" };
+  if ((minutes >= 9 * 60 + 30 && minutes <= 11 * 60 + 30) || (minutes >= 13 * 60 && minutes <= 15 * 60)) return { phase: "trading", text: "盘中交易" };
+  if (minutes > 11 * 60 + 30 && minutes < 13 * 60) return { phase: "lunch", text: "午间休市" };
+  return { phase: "closed", text: "非交易时段" };
+}
+
+function updateAutoRefreshStatus() {
+  const session = clientMarketSession();
+  if (!state.refresh.autoEnabled) {
+    els.autoRefreshStatus.textContent = "自动刷新关闭";
+    return;
+  }
+  if (document.hidden) {
+    els.autoRefreshStatus.textContent = "页面隐藏，自动刷新暂停";
+    return;
+  }
+  const interval = effectiveAutoRefreshInterval();
+  const next = state.refresh.nextDueAt ? ` · 下次${timeText(state.refresh.nextDueAt)}` : "";
+  els.autoRefreshStatus.textContent = `自动${durationText(interval)} · ${session.text}${next}`;
+}
+
+function renderDataState(payload = {}) {
+  const dataState = payload.dataState || null;
+  state.refresh.lastDataState = dataState;
+  state.refresh.lastRefreshAt = Date.now();
+  if (!dataState) {
+    els.dataStatusBadge.textContent = payload.warning ? "行情状态待确认" : "数据已更新";
+    els.dataStatusBadge.className = "data-status-badge";
+    return;
+  }
+  els.dataStatusBadge.textContent = `${dataState.cacheStatusText || "状态待确认"} · ${dataState.ageText || "刚刚"} · ${dataState.marketPhaseText || ""}`;
+  els.dataStatusBadge.className = `data-status-badge ${dataState.severity || ""}`.trim();
+  els.dataStatusBadge.title = `${dataState.realtimeText || ""}；${dataState.quotaHint || ""}`;
+}
+
+function durationText(ms) {
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds}秒`;
+  const minutes = Math.round(seconds / 60);
+  return `${minutes}分钟`;
+}
+
+function timeText(timestamp) {
+  return new Date(timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+}
+
+function notify(message, options = {}) {
+  if (!options.auto) showToast(message);
+}
+
+async function refresh(options = {}) {
+  if (state.refresh.inFlight) return;
+  state.refresh.inFlight = true;
+  clearAutoRefreshTimer();
   if (state.view === "watch") {
-    await refreshWatchlist();
+    await refreshWatchlist(options);
+    state.refresh.inFlight = false;
+    scheduleAutoRefresh();
     return;
   }
   if (state.view === "sectors") {
-    await refreshSectors();
+    await refreshSectors(options);
+    state.refresh.inFlight = false;
+    scheduleAutoRefresh();
     return;
   }
   if (state.view === "hot") {
-    await refreshHotLeaders();
+    await refreshHotLeaders(options);
+    state.refresh.inFlight = false;
+    scheduleAutoRefresh();
     return;
   }
   if (state.view === "breakout") {
-    await refreshBreakouts();
+    await refreshBreakouts(options);
+    state.refresh.inFlight = false;
+    scheduleAutoRefresh();
     return;
   }
   updateOutputs();
   els.refreshBtn.disabled = true;
-  els.refreshBtn.textContent = "刷新中";
+  els.refreshBtn.textContent = options.auto ? "自动刷新中" : "刷新中";
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), 15_000);
   try {
@@ -309,19 +445,21 @@ async function refresh() {
     state.rows = payload.rows;
     state.filteredRows = payload.rows;
     render(payload);
-    showToast(payload.warning || "行情已更新");
+    notify(payload.warning || "行情已更新", options);
   } catch (error) {
-    showToast(error.name === "AbortError" ? "行情请求超时" : error.message);
+    notify(error.name === "AbortError" ? "行情请求超时" : error.message, options);
   } finally {
     window.clearTimeout(timeoutId);
     els.refreshBtn.disabled = false;
     els.refreshBtn.textContent = "↻ 刷新";
+    state.refresh.inFlight = false;
+    scheduleAutoRefresh();
   }
 }
 
-async function refreshWatchlist() {
+async function refreshWatchlist(options = {}) {
   els.refreshBtn.disabled = true;
-  els.refreshBtn.textContent = "刷新中";
+  els.refreshBtn.textContent = options.auto ? "自动刷新中" : "刷新中";
   els.watchState.textContent = "盯盘总榜数据加载中";
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), 45_000);
@@ -334,10 +472,10 @@ async function refreshWatchlist() {
     if (!response.ok) throw new Error(payload.error || "请求失败");
     state.watchRows = payload.rows;
     renderWatchlist(payload);
-    showToast(payload.warning || "盯盘总榜已更新");
+    notify(payload.warning || "盯盘总榜已更新", options);
   } catch (error) {
     els.watchState.textContent = error.name === "AbortError" ? "盯盘总榜请求超时" : error.message;
-    showToast(els.watchState.textContent);
+    notify(els.watchState.textContent, options);
   } finally {
     window.clearTimeout(timeoutId);
     els.refreshBtn.disabled = false;
@@ -345,9 +483,9 @@ async function refreshWatchlist() {
   }
 }
 
-async function refreshHotLeaders() {
+async function refreshHotLeaders(options = {}) {
   els.refreshBtn.disabled = true;
-  els.refreshBtn.textContent = "刷新中";
+  els.refreshBtn.textContent = options.auto ? "自动刷新中" : "刷新中";
   els.hotState.textContent = "热度龙头数据加载中";
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), 45_000);
@@ -360,10 +498,10 @@ async function refreshHotLeaders() {
     if (!response.ok) throw new Error(payload.error || "请求失败");
     state.hotRows = payload.rows;
     renderHotLeaders(payload);
-    showToast(payload.warning || "热度龙头已更新");
+    notify(payload.warning || "热度龙头已更新", options);
   } catch (error) {
     els.hotState.textContent = error.name === "AbortError" ? "热度榜请求超时" : error.message;
-    showToast(els.hotState.textContent);
+    notify(els.hotState.textContent, options);
   } finally {
     window.clearTimeout(timeoutId);
     els.refreshBtn.disabled = false;
@@ -371,9 +509,9 @@ async function refreshHotLeaders() {
   }
 }
 
-async function refreshSectors() {
+async function refreshSectors(options = {}) {
   els.refreshBtn.disabled = true;
-  els.refreshBtn.textContent = "刷新中";
+  els.refreshBtn.textContent = options.auto ? "自动刷新中" : "刷新中";
   els.sectorState.textContent = "板块轮动数据加载中";
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), 18_000);
@@ -386,10 +524,10 @@ async function refreshSectors() {
     if (!response.ok) throw new Error(payload.error || "请求失败");
     state.sectorRows = payload.rows;
     renderSectors(payload);
-    showToast(payload.warning || "板块轮动已更新");
+    notify(payload.warning || "板块轮动已更新", options);
   } catch (error) {
     els.sectorState.textContent = error.name === "AbortError" ? "板块行情请求超时" : error.message;
-    showToast(els.sectorState.textContent);
+    notify(els.sectorState.textContent, options);
   } finally {
     window.clearTimeout(timeoutId);
     els.refreshBtn.disabled = false;
@@ -397,9 +535,9 @@ async function refreshSectors() {
   }
 }
 
-async function refreshBreakouts() {
+async function refreshBreakouts(options = {}) {
   els.refreshBtn.disabled = true;
-  els.refreshBtn.textContent = "刷新中";
+  els.refreshBtn.textContent = options.auto ? "自动刷新中" : "刷新中";
   els.breakoutState.textContent = "起爆预警数据加载中";
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), 45_000);
@@ -412,10 +550,10 @@ async function refreshBreakouts() {
     if (!response.ok) throw new Error(payload.error || "请求失败");
     state.breakoutRows = payload.rows;
     renderBreakouts(payload);
-    showToast(payload.warning || "起爆预警已更新");
+    notify(payload.warning || "起爆预警已更新", options);
   } catch (error) {
     els.breakoutState.textContent = error.name === "AbortError" ? "起爆预警请求超时" : error.message;
-    showToast(els.breakoutState.textContent);
+    notify(els.breakoutState.textContent, options);
   } finally {
     window.clearTimeout(timeoutId);
     els.refreshBtn.disabled = false;
@@ -424,6 +562,7 @@ async function refreshBreakouts() {
 }
 
 function render(payload) {
+  renderDataState(payload);
   els.candidateCount.textContent = payload.stats.total;
   els.totalMain.textContent = money(payload.stats.totalMainInflow);
   els.positiveSuper.textContent = `${payload.stats.positiveSuper}/${payload.stats.total}`;
@@ -436,6 +575,7 @@ function render(payload) {
 }
 
 function renderWatchlist(payload) {
+  renderDataState(payload);
   els.watchCount.textContent = payload.stats.total;
   els.watchConfluenceCount.textContent = payload.stats.confluence;
   els.watchBreakoutCount.textContent = payload.stats.freshBreakout;
@@ -452,6 +592,7 @@ function renderWatchlist(payload) {
 }
 
 function renderSectors(payload) {
+  renderDataState(payload);
   els.sectorCount.textContent = payload.stats.total;
   els.sectorHotCount.textContent = `${payload.stats.strong}/${payload.stats.warming}`;
   els.sectorFadeCount.textContent = payload.stats.fading;
@@ -468,6 +609,7 @@ function renderSectors(payload) {
 }
 
 function renderHotLeaders(payload) {
+  renderDataState(payload);
   els.hotCount.textContent = payload.stats.total;
   els.hotStrongCount.textContent = payload.stats.strong;
   els.hotPositiveFlow.textContent = payload.stats.positiveFlow;
@@ -482,6 +624,7 @@ function renderHotLeaders(payload) {
 }
 
 function renderBreakouts(payload) {
+  renderDataState(payload);
   els.breakoutCount.textContent = payload.stats.total;
   els.breakoutStrongCount.textContent = payload.stats.strong;
   els.breakoutPositiveFlow.textContent = payload.stats.positiveFlow;
@@ -1900,10 +2043,10 @@ function setView(view) {
   document.querySelectorAll(".view-tab").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.view === view);
   });
-  if (view === "watch" && !state.watchRows.length) refreshWatchlist();
-  if (view === "sectors" && !state.sectorRows.length) refreshSectors();
-  if (view === "hot" && !state.hotRows.length) refreshHotLeaders();
-  if (view === "breakout" && !state.breakoutRows.length) refreshBreakouts();
+  if (view === "watch" && !state.watchRows.length) refresh();
+  if (view === "sectors" && !state.sectorRows.length) refresh();
+  if (view === "hot" && !state.hotRows.length) refresh();
+  if (view === "breakout" && !state.breakoutRows.length) refresh();
 }
 
 function setWatchPeriod(period) {
@@ -1912,7 +2055,7 @@ function setWatchPeriod(period) {
   document.querySelectorAll(".watch-period").forEach((button) => {
     button.classList.toggle("is-active", Number(button.dataset.watchPeriod) === state.watchPeriod);
   });
-  refreshWatchlist();
+  refresh();
 }
 
 function setPeriod(period) {
@@ -1921,7 +2064,7 @@ function setPeriod(period) {
   document.querySelectorAll(".period").forEach((button) => {
     button.classList.toggle("is-active", Number(button.dataset.period) === state.sectorPeriod);
   });
-  refreshSectors();
+  refresh();
 }
 
 function setHotPeriod(period) {
@@ -1930,7 +2073,7 @@ function setHotPeriod(period) {
   document.querySelectorAll(".hot-period").forEach((button) => {
     button.classList.toggle("is-active", Number(button.dataset.hotPeriod) === state.hotPeriod);
   });
-  refreshHotLeaders();
+  refresh();
 }
 
 function showToast(message) {
@@ -2195,6 +2338,25 @@ document.addEventListener("keydown", (event) => {
 els.refreshBtn.addEventListener("click", refresh);
 els.exportBtn.addEventListener("click", exportCsv);
 
+els.autoRefreshToggle.addEventListener("change", () => {
+  state.refresh.autoEnabled = els.autoRefreshToggle.checked;
+  saveAutoRefreshSettings();
+  scheduleAutoRefresh();
+});
+
+els.autoRefreshInterval.addEventListener("change", () => {
+  state.refresh.intervalMs = Number(els.autoRefreshInterval.value) || 60_000;
+  saveAutoRefreshSettings();
+  scheduleAutoRefresh();
+});
+
+document.addEventListener("visibilitychange", () => {
+  scheduleAutoRefresh();
+});
+
+window.setInterval(updateAutoRefreshStatus, 1000);
+
+loadAutoRefreshSettings();
 loadBreakoutAlertSettings();
 syncBreakoutAlertControls();
 updateOutputs();

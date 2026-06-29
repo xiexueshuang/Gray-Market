@@ -31,7 +31,9 @@ const {
   buildStockChipInsight,
   buildAiStockDiagnosis,
   buildRuleSectorInterpretation,
-  normalizeSectorInterpretation
+  normalizeSectorInterpretation,
+  dataStateFromCache,
+  combineDataStates
 } = require("../server.js");
 
 test("normalizes board breadth and money fields", () => {
@@ -619,6 +621,23 @@ test("one-day board flow fields are numeric", () => {
   assert.equal(rows[0].oneDayFlow.fundRankChange, 1);
 });
 
+test("data state exposes cache freshness and refresh policy", () => {
+  const live = dataStateFromCache({ cacheStatus: "live", ageMs: 0 }, "盯盘总榜");
+  assert.equal(live.cacheStatusText, "实时更新");
+  assert.equal(live.severity, "good");
+  assert(live.suggestedRefreshMs >= 30_000);
+  assert.match(live.quotaHint, /60-120秒/);
+
+  const stale = dataStateFromCache({ cacheStatus: "disk", ageMs: 600_000 }, "热度龙头");
+  assert.equal(stale.severity, "bad");
+  assert.equal(stale.cacheStatusText, "磁盘缓存");
+
+  const combined = combineDataStates([live, stale], "综合榜单");
+  assert.equal(combined.label, "综合榜单");
+  assert.equal(combined.severity, "bad");
+  assert.equal(combined.sources.length, 2);
+});
+
 test("news extraction handles normal and empty responses", () => {
   const items = extractNewsItems({
     status_code: 0,
@@ -778,6 +797,10 @@ test("watchlist page exposes merged list, filters, detail modal, and CSV export"
   const css = fs.readFileSync(path.join(__dirname, "../public/styles.css"), "utf8");
   const pkg = fs.readFileSync(path.join(__dirname, "../package.json"), "utf8");
   assert.match(html, /data-view="watch"/);
+  assert.match(html, /id="autoRefreshToggle"/);
+  assert.match(html, /id="autoRefreshInterval"/);
+  assert.match(html, /id="autoRefreshStatus"/);
+  assert.match(html, /id="dataStatusBadge"/);
   assert.match(html, /id="watchView"/);
   assert.match(html, /id="watchRowsBody"/);
   assert.match(html, /id="watchDetailModal"/);
@@ -789,6 +812,10 @@ test("watchlist page exposes merged list, filters, detail modal, and CSV export"
   assert.match(html, /data-watch-filter="confluence"/);
   assert.match(html, /data-watch-filter="freshBreakout"/);
   assert.match(app, /function refreshWatchlist/);
+  assert.match(app, /AUTO_REFRESH_STORAGE_KEY/);
+  assert.match(app, /function scheduleAutoRefresh/);
+  assert.match(app, /function effectiveAutoRefreshInterval/);
+  assert.match(app, /function renderDataState/);
   assert.match(app, /\/api\/watchlist\?period=/);
   assert.match(app, /function renderWatchDetail/);
   assert.match(app, /function loadStockCharts/);
@@ -806,6 +833,8 @@ test("watchlist page exposes merged list, filters, detail modal, and CSV export"
   assert.match(css, /chart-cost-zone/);
   assert.match(css, /chart-inline-legend/);
   assert.match(css, /width: min\(1760px, calc\(100vw - 20px\)\)/);
+  assert.match(css, /refresh-controls/);
+  assert.match(css, /data-status-badge/);
   assert.match(css, /grid-template-columns: 1fr/);
   assert.match(css, /daily-chart-card \.stock-chart/);
   assert.match(app, /function exportWatchCsv/);

@@ -122,6 +122,75 @@ h2 {
   gap: 10px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  align-items: center;
+}
+
+.refresh-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  max-width: 720px;
+}
+
+.auto-refresh-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fffaf2;
+  padding: 0 10px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.auto-refresh-toggle input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+#autoRefreshInterval {
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper);
+  color: var(--ink);
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+#autoRefreshStatus,
+.data-status-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  border-radius: 999px;
+  padding: 0 10px;
+  background: #f8f5ef;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.data-status-badge.good {
+  background: #ecfdf5;
+  color: var(--green);
+}
+
+.data-status-badge.warn {
+  background: #fff7ed;
+  color: var(--amber);
+}
+
+.data-status-badge.bad {
+  background: #fef2f2;
+  color: var(--red);
 }
 
 .view-tabs {
@@ -1251,6 +1320,18 @@ tbody tr:hover {
 
   .actions {
     justify-content: stretch;
+  }
+
+  .refresh-controls {
+    justify-content: stretch;
+    width: 100%;
+  }
+
+  #autoRefreshStatus,
+  .data-status-badge {
+    flex: 1;
+    justify-content: center;
+    white-space: normal;
   }
 
   .actions button {

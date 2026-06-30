@@ -7,6 +7,7 @@ const state = {
   view: "tracker",
   watchRows: [],
   filteredWatchRows: [],
+  breakoutHistoryRows: [],
   watchSortKey: "watchScore",
   watchSortDir: "desc",
   watchPeriod: 1,
@@ -35,6 +36,7 @@ const state = {
     minScore: 78,
     stage: "刚起爆"
   },
+  accountAmount: null,
   breakoutAlertSeen: new Set(),
   detailCharts: {
     watch: [],
@@ -54,6 +56,7 @@ const state = {
 const API_BASE = window.location.protocol === "file:" ? "http://localhost:4173" : "";
 const BREAKOUT_ALERT_STORAGE_KEY = "grayMarket.breakoutAlertSettings";
 const AUTO_REFRESH_STORAGE_KEY = "grayMarket.autoRefreshSettings";
+const ACCOUNT_AMOUNT_STORAGE_KEY = "grayMarket.accountAmount";
 const LIGHTWEIGHT_CHARTS_SRC = `${API_BASE}/vendor/lightweight-charts.standalone.production.js`;
 const BREAKOUT_STAGE_RANK = {
   "观察": 1,
@@ -98,6 +101,8 @@ const els = {
   watchView: document.querySelector("#watchView"),
   watchTimestamp: document.querySelector("#watchTimestamp"),
   watchSourceBadge: document.querySelector("#watchSourceBadge"),
+  accountAmountInput: document.querySelector("#accountAmountInput"),
+  accountAmountHint: document.querySelector("#accountAmountHint"),
   watchCount: document.querySelector("#watchCount"),
   watchConfluenceCount: document.querySelector("#watchConfluenceCount"),
   watchBreakoutCount: document.querySelector("#watchBreakoutCount"),
@@ -105,6 +110,8 @@ const els = {
   watchPositiveFlow: document.querySelector("#watchPositiveFlow"),
   watchAvgScore: document.querySelector("#watchAvgScore"),
   watchFocusList: document.querySelector("#watchFocusList"),
+  watchHistoryRowsBody: document.querySelector("#watchHistoryRowsBody"),
+  watchHistoryState: document.querySelector("#watchHistoryState"),
   watchRowsBody: document.querySelector("#watchRowsBody"),
   watchSearchInput: document.querySelector("#watchSearchInput"),
   watchState: document.querySelector("#watchState"),
@@ -247,6 +254,35 @@ function readBreakoutAlertControls() {
   };
   syncBreakoutAlertControls();
   saveBreakoutAlertSettings();
+}
+
+function loadAccountAmount() {
+  const saved = Number(window.localStorage.getItem(ACCOUNT_AMOUNT_STORAGE_KEY));
+  state.accountAmount = Number.isFinite(saved) && saved > 0 ? saved : null;
+  syncAccountAmountControl();
+}
+
+function saveAccountAmount() {
+  if (state.accountAmount && state.accountAmount > 0) {
+    window.localStorage.setItem(ACCOUNT_AMOUNT_STORAGE_KEY, String(state.accountAmount));
+  } else {
+    window.localStorage.removeItem(ACCOUNT_AMOUNT_STORAGE_KEY);
+  }
+}
+
+function syncAccountAmountControl() {
+  if (!els.accountAmountInput || !els.accountAmountHint) return;
+  els.accountAmountInput.value = state.accountAmount ? String(state.accountAmount) : "";
+  els.accountAmountHint.textContent = state.accountAmount
+    ? `已按账户总资金 ${money(state.accountAmount)} 折算仓位`
+    : "未填写，仅显示仓位比例";
+}
+
+function readAccountAmountControl() {
+  const value = Number(els.accountAmountInput.value);
+  state.accountAmount = Number.isFinite(value) && value > 0 ? value : null;
+  saveAccountAmount();
+  syncAccountAmountControl();
 }
 
 function statusClass(status) {
@@ -471,6 +507,7 @@ async function refreshWatchlist(options = {}) {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "请求失败");
     state.watchRows = payload.rows;
+    state.breakoutHistoryRows = payload.breakoutHistory?.rows || [];
     renderWatchlist(payload);
     notify(payload.warning || "盯盘总榜已更新", options);
   } catch (error) {
@@ -586,9 +623,33 @@ function renderWatchlist(payload) {
   els.watchSourceBadge.textContent = payload.source;
   applyWatchSearchAndSort();
   renderWatchFocus();
+  renderBreakoutHistory(payload.breakoutHistory);
   renderWatchTable();
   els.watchState.textContent = state.filteredWatchRows.length ? "" : "当前筛选条件下没有盯盘候选";
   handleBreakoutAlerts(payload.rows);
+}
+
+function renderBreakoutHistory(history) {
+  const rows = history?.rows || state.breakoutHistoryRows || [];
+  const stats = history?.stats || {};
+  els.watchHistoryState.textContent = rows.length
+    ? `累计${stats.total || rows.length}只，今日${stats.today || 0}只，最近触发：${stats.latestTime || "待确认"}`
+    : "暂无起爆历史，等待股票进入“刚起爆”阶段";
+  els.watchHistoryRowsBody.innerHTML = rows.map((row) => `
+    <tr class="watch-history-row ${row.currentInWatchlist ? "" : "is-muted"}" data-code="${row.code}" role="${row.currentInWatchlist ? "button" : "row"}" tabindex="${row.currentInWatchlist ? "0" : "-1"}" title="${row.currentInWatchlist ? `查看${row.name}盯盘详情` : "历史记录暂未进入当前盯盘榜"}">
+      <td>${row.firstBreakoutText || "待确认"}</td>
+      <td>${row.lastBreakoutText || "待确认"}</td>
+      <td>${codeOf(row)}</td>
+      <td><strong>${row.name}</strong></td>
+      <td>${row.sectorName || "待确认"}</td>
+      <td>${row.breakoutCount || 1}</td>
+      <td><span class="tag ${tagStyle(row.currentStage)}">${row.currentStage || "历史起爆"}</span></td>
+      <td>${Number.isFinite(row.currentWatchScore) ? fixed(row.currentWatchScore, 1) : "待确认"}</td>
+      <td class="${(row.currentChangePct || 0) >= 0 ? "up" : "down"}">${pct(row.currentChangePct)}</td>
+      <td>${renderTradeTag(row.currentEntryAction || row.currentTradeAction)}</td>
+      <td>${row.currentRiskLine || "待确认"}</td>
+    </tr>
+  `).join("");
 }
 
 function renderSectors(payload) {
@@ -690,6 +751,96 @@ function renderWatchTags(row) {
   return (row.tags || []).map((tag) => `<span class="tag ${tagStyle(tag)}">${tag}</span>`).join("");
 }
 
+function tradeTagClass(value) {
+  if (value === "试买" || value === "突破买" || value === "承接区低吸" || value === "首仓10%" || value === "可加到20%" || value === "守风险线" || value === "持有") return "strong";
+  if (value === "等回踩买" || value === "首仓5%" || value === "可加到10%" || value === "首仓后确认" || value === "不加仓" || value === "盯紧止损" || value === "压力位减仓" || value === "减仓") return "warm";
+  if (value === "破线卖出" || value === "清仓") return "diverge";
+  if (value === "空仓" || value === "先不买") return "split";
+  return "split";
+}
+
+function renderTradeTag(value) {
+  return `<span class="tag ${tradeTagClass(value)}">${value || "待确认"}</span>`;
+}
+
+function percentText(value) {
+  return Number.isFinite(value) ? `${Math.round(value * 100)}%` : "待确认";
+}
+
+function positionAmountText(pctValue) {
+  if (!state.accountAmount || !Number.isFinite(pctValue) || pctValue <= 0) return "";
+  return ` = ${money(state.accountAmount * pctValue)}`;
+}
+
+function positionPlanText(position) {
+  if (!position) return "待确认";
+  if (position.hint === "不加仓") return "不加仓，持仓按压力位分批降仓";
+  if ((position.maxPct || 0) <= 0) return "空仓";
+  return `首仓${percentText(position.initialPct)}${positionAmountText(position.initialPct)} · 加到${percentText(position.addToPct || position.maxPct)}${positionAmountText(position.addToPct || position.maxPct)} · 口径：账户总资金`;
+}
+
+function renderLogicList(items) {
+  const rows = Array.isArray(items) && items.length ? items : ["待确认"];
+  return `<ul class="trade-logic-list">${rows.map((item) => `<li>${item}</li>`).join("")}</ul>`;
+}
+
+function renderTradePlanCards(plan) {
+  if (!plan) {
+    return `
+      <div class="detail-card wide-card">
+        <span>交易计划</span>
+        <strong>待确认</strong>
+      </div>
+    `;
+  }
+  return `
+    <div class="detail-card trade-plan-card">
+      <span>买入</span>
+      <strong>${plan.signalTier} · ${renderTradeTag(plan.entryAction)}</strong>
+      <small>${plan.buyPoints?.[0]?.trigger || "待确认"}</small>
+    </div>
+    <div class="detail-card trade-plan-card">
+      <span>持仓</span>
+      <strong>${renderTradeTag(plan.holdAction)}</strong>
+      <small>${plan.sellLogic?.[0] || "待确认"}</small>
+    </div>
+    <div class="detail-card trade-plan-card">
+      <span>仓位</span>
+      <strong>${renderTradeTag(plan.positionAction || plan.positionHint)} · ${positionPlanText(plan.position)}</strong>
+      <small>默认风格：稳中进攻，周期：1-5个交易日</small>
+    </div>
+    <div class="detail-card trade-plan-card">
+      <span>加仓</span>
+      <strong>${renderTradeTag(plan.addPositionAction)}</strong>
+      <small>${plan.addLogic?.[0] || "待确认"}</small>
+    </div>
+    <div class="detail-card trade-plan-card">
+      <span>风控</span>
+      <strong>${renderTradeTag(plan.riskAction || plan.riskLineStatus)} · ${plan.riskLines?.hardInvalid || "待确认"}</strong>
+    </div>
+    <div class="detail-card wide-card">
+      <span>完整操作说明</span>
+      <strong>${plan.operationText || "待确认"}</strong>
+    </div>
+    <div class="detail-card wide-card">
+      <span>未持仓怎么做</span>
+      ${renderLogicList(plan.buyLogic)}
+    </div>
+    <div class="detail-card wide-card">
+      <span>已持仓怎么做</span>
+      ${renderLogicList(plan.sellLogic)}
+    </div>
+    <div class="detail-card wide-card">
+      <span>加仓条件</span>
+      ${renderLogicList(plan.addLogic)}
+    </div>
+    <div class="detail-card wide-card">
+      <span>跌破哪里必须卖</span>
+      <strong>买点：${plan.riskLines?.entry || "待确认"}；结构：${plan.riskLines?.structural || "待确认"}；硬失效：${plan.riskLines?.hardInvalid || "待确认"}</strong>
+    </div>
+  `;
+}
+
 function renderWatchFocus() {
   const rows = state.filteredWatchRows.slice(0, 4);
   els.watchFocusList.innerHTML = rows.map((row) => `
@@ -704,6 +855,9 @@ function renderWatchFocus() {
       <div class="watch-tags">${renderWatchTags(row)}</div>
       <div class="focus-grid">
         <div class="mini"><span>阶段</span><strong>${row.breakoutStage || "待确认"}</strong></div>
+        <div class="mini"><span>买入</span><strong>${row.entryAction || row.tradeAction || "待确认"}</strong></div>
+        <div class="mini"><span>持仓</span><strong>${row.holdAction || "待确认"}</strong></div>
+        <div class="mini"><span>仓位</span><strong>${row.positionHint || "待确认"}</strong></div>
         <div class="mini"><span>热度</span><strong>${Number.isFinite(row.heatRank) ? `第${row.heatRank}` : "待确认"}</strong></div>
         <div class="mini"><span>涨幅</span><strong class="${row.changePct >= 0 ? "up" : "down"}">${pct(row.changePct)}</strong></div>
       </div>
@@ -727,6 +881,9 @@ function renderWatchTable() {
       <td><strong>${fixed(row.watchScore, 2)}</strong></td>
       <td><div class="watch-tags compact-tags">${renderWatchTags(row)}</div></td>
       <td><span class="tag ${tagStyle(row.breakoutStage)}">${row.breakoutStage || "待确认"}</span></td>
+      <td>${renderTradeTag(row.entryAction || row.tradeAction)}</td>
+      <td>${renderTradeTag(row.holdAction)}</td>
+      <td>${renderTradeTag(row.positionHint)}</td>
       <td>${Number.isFinite(row.heatRank) ? row.heatRank : "待确认"}</td>
       <td>${Number.isFinite(row.xueqiuRank) ? row.xueqiuRank : "未上榜"}</td>
       <td class="${row.changePct >= 0 ? "up" : "down"}">${pct(row.changePct)}</td>
@@ -736,6 +893,7 @@ function renderWatchTable() {
       <td class="${row.superInflow >= 0 ? "up" : "down"}">${money(row.superInflow)}</td>
       <td class="${row.ddeNetAmount >= 0 ? "up" : "down"}">${money(row.ddeNetAmount)}</td>
       <td>${money(row.largeOrderAmount)}</td>
+      <td>${renderTradeTag(row.riskAction || row.riskLineStatus)}</td>
       <td>${row.riskLine || "待确认"}</td>
       <td>${row.watchNote || "待确认"}</td>
     </tr>
@@ -931,6 +1089,9 @@ function renderHotFocus() {
         <div class="mini"><span>板块</span><strong>${row.sectorName}</strong></div>
         <div class="mini"><span>涨幅</span><strong class="${row.changePct >= 0 ? "up" : "down"}">${pct(row.changePct)}</strong></div>
         <div class="mini"><span>等级</span><strong>${row.grade}</strong></div>
+        <div class="mini"><span>买入</span><strong>${row.entryAction || row.tradeAction || "待确认"}</strong></div>
+        <div class="mini"><span>持仓</span><strong>${row.holdAction || "待确认"}</strong></div>
+        <div class="mini"><span>仓位</span><strong>${row.positionHint || "待确认"}</strong></div>
       </div>
       <div class="concept-line">${row.conceptNote || "题材待确认"} · 雪球${Number.isFinite(row.xueqiuRank) ? `第${row.xueqiuRank}` : "未上榜"}</div>
       <div class="bars">
@@ -965,6 +1126,10 @@ function renderHotTable() {
       <td>${row.conceptNote || "待确认"}</td>
       <td><strong>${fixed(row.totalScore, 2)}</strong></td>
       <td><span class="tag ${statusClass(row.grade)}">${row.grade}</span></td>
+      <td>${renderTradeTag(row.entryAction || row.tradeAction)}</td>
+      <td>${renderTradeTag(row.holdAction)}</td>
+      <td>${renderTradeTag(row.positionHint)}</td>
+      <td>${renderTradeTag(row.riskAction || row.riskLineStatus)}</td>
       <td>${row.carryReason}</td>
       <td>${row.riskReward}</td>
       <td>${row.riskLine}</td>
@@ -1722,6 +1887,7 @@ function renderWatchDetail(row, detail) {
       <span>DDE / 大单总额</span>
       <strong>${money(row.ddeNetAmount)} · ${money(row.largeOrderAmount)}</strong>
     </div>
+    ${renderTradePlanCards(detail.tradePlan || row.tradePlan)}
     ${hotCards}
     ${breakoutCards}
     <div class="detail-card wide-card">
@@ -1809,6 +1975,7 @@ function renderHotDetail(row, detail) {
       <span>周期评分</span>
       <strong>${detail.period}</strong>
     </div>
+    ${renderTradePlanCards(detail.tradePlan || row.tradePlan)}
     <div class="detail-card wide-card">
       <span>AI股票分析</span>
       <strong>${detail.aiAnalysis}</strong>
@@ -1908,7 +2075,7 @@ function exportCsv() {
 }
 
 function exportWatchCsv() {
-  const header = ["排名", "代码", "名称", "板块", "盯盘分", "来源标签", "起爆阶段", "热度排名", "雪球排名", "涨幅", "成交额", "量比", "主力净额", "超大单净额", "DDE大单净额", "DDE大单净量", "大单总额", "风险线", "买点条件", "盯盘备注"];
+  const header = ["排名", "代码", "名称", "板块", "盯盘分", "来源标签", "起爆阶段", "买入", "持仓", "仓位", "加仓", "风控", "完整操作说明", "热度排名", "雪球排名", "涨幅", "成交额", "量比", "主力净额", "超大单净额", "DDE大单净额", "DDE大单净量", "大单总额", "风险线", "买点条件", "盯盘备注"];
   const rows = state.filteredWatchRows.map((row) => [
     row.rank,
     codeOf(row),
@@ -1917,6 +2084,12 @@ function exportWatchCsv() {
     row.watchScore,
     (row.tags || []).join("/"),
     row.breakoutStage,
+    row.entryAction || row.tradeAction,
+    row.holdAction,
+    row.positionHint,
+    row.addPositionAction,
+    row.riskAction || row.riskLineStatus,
+    row.operationText,
     Number.isFinite(row.heatRank) ? row.heatRank : "",
     Number.isFinite(row.xueqiuRank) ? row.xueqiuRank : "",
     row.changePct,
@@ -1944,7 +2117,7 @@ function exportWatchCsv() {
 }
 
 function exportHotCsv() {
-  const header = ["综合排名", "代码", "名称", "所属板块", "同花顺热度排名", "雪球排名", "雪球热度", "雪球变化", "同花顺热度变化", "涨幅", "成交额", "量比", "振幅", "换手", "主力净额", "超大单净额", "龙头类型", "炒作概念", "综合评分", "推荐等级", "短线承接理由", "风险收益判断", "风险线", "失效条件"];
+  const header = ["综合排名", "代码", "名称", "所属板块", "同花顺热度排名", "雪球排名", "雪球热度", "雪球变化", "同花顺热度变化", "涨幅", "成交额", "量比", "振幅", "换手", "主力净额", "超大单净额", "龙头类型", "炒作概念", "综合评分", "推荐等级", "买入", "持仓", "仓位", "加仓", "风控", "完整操作说明", "短线承接理由", "风险收益判断", "风险线", "失效条件"];
   const rows = state.filteredHotRows.slice(0, 50).map((row) => [
     row.rank,
     codeOf(row),
@@ -1966,6 +2139,12 @@ function exportHotCsv() {
     row.conceptNote,
     row.totalScore,
     row.grade,
+    row.entryAction || row.tradeAction,
+    row.holdAction,
+    row.positionHint,
+    row.addPositionAction,
+    row.riskAction || row.riskLineStatus,
+    row.operationText,
     row.carryReason,
     row.riskReward,
     row.riskLine,
@@ -2247,6 +2426,11 @@ els.breakoutSearchInput.addEventListener("input", () => {
   });
 });
 
+if (els.accountAmountInput) {
+  els.accountAmountInput.addEventListener("input", readAccountAmountControl);
+  els.accountAmountInput.addEventListener("change", readAccountAmountControl);
+}
+
 els.breakoutAlertTest.addEventListener("click", () => {
   unlockBreakoutAlertSound();
   playBreakoutAlertSound();
@@ -2295,6 +2479,19 @@ els.watchRowsBody.addEventListener("click", (event) => {
 els.watchRowsBody.addEventListener("keydown", (event) => {
   const row = event.target.closest(".watch-row");
   if (!row || (event.key !== "Enter" && event.key !== " ")) return;
+  event.preventDefault();
+  loadWatchDetail(row.dataset.code);
+});
+
+els.watchHistoryRowsBody.addEventListener("click", (event) => {
+  const row = event.target.closest(".watch-history-row");
+  if (row && state.watchRows.some((item) => item.code === row.dataset.code)) loadWatchDetail(row.dataset.code);
+});
+
+els.watchHistoryRowsBody.addEventListener("keydown", (event) => {
+  const row = event.target.closest(".watch-history-row");
+  if (!row || (event.key !== "Enter" && event.key !== " ")) return;
+  if (!state.watchRows.some((item) => item.code === row.dataset.code)) return;
   event.preventDefault();
   loadWatchDetail(row.dataset.code);
 });
@@ -2358,6 +2555,7 @@ window.setInterval(updateAutoRefreshStatus, 1000);
 
 loadAutoRefreshSettings();
 loadBreakoutAlertSettings();
+loadAccountAmount();
 syncBreakoutAlertControls();
 updateOutputs();
 refresh();

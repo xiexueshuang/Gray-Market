@@ -329,6 +329,37 @@ output {
   align-items: end;
 }
 
+.account-settings {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) 1fr;
+  gap: 12px;
+  align-items: center;
+  margin: 0 0 14px;
+}
+
+.account-settings label {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px;
+  background: #fffaf2;
+  min-height: 62px;
+}
+
+.account-settings input {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper);
+  color: var(--ink);
+  padding: 0 10px;
+}
+
+.account-settings span:last-child {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
 .alert-settings label {
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -424,7 +455,7 @@ output {
 
 .focus-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
   gap: 8px;
   margin: 12px 0;
 }
@@ -549,6 +580,34 @@ output {
   display: block;
   font-size: 18px;
   line-height: 1.35;
+}
+
+.detail-card small {
+  display: block;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.trade-plan-card {
+  background: #f7fffb;
+  border-color: #b9ded3;
+}
+
+.trade-plan-card strong {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.trade-logic-list {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.65;
 }
 
 .news-panel {
@@ -814,6 +873,16 @@ output {
 
 .watch-metrics {
   grid-template-columns: repeat(6, 1fr);
+}
+
+.watch-history-row {
+  cursor: pointer;
+}
+
+.watch-history-row.is-muted {
+  cursor: default;
+  color: var(--muted);
+  background: #fbf8f1;
 }
 
 .watch-tags {
@@ -1288,6 +1357,7 @@ tbody tr:hover {
 
 @media (max-width: 980px) {
   .filters,
+  .account-settings,
   .alert-settings,
   .metrics,
   .focus-list,
@@ -1339,6 +1409,7 @@ tbody tr:hover {
   }
 
   .filters,
+  .account-settings,
   .alert-settings,
   .metrics,
   .focus-list,

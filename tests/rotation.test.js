@@ -14,6 +14,8 @@ const {
   hithinkRowToHotStock,
   keepHotStock,
   limitHotLeaderRows,
+  mergeBreakoutHistoryRecords,
+  buildBreakoutHistoryPayload,
   mergeXueqiuHotRows,
   mergeWatchlistRows,
   movingAverage,
@@ -27,6 +29,7 @@ const {
   periodMetrics,
   scoreBoard,
   scoreStock,
+  buildTradePlan,
   attachOneDayFlows,
   buildStockChipInsight,
   buildAiStockDiagnosis,
@@ -550,6 +553,117 @@ test("watchlist scoring covers confluence, hot-only, and breakout-only branches"
   ]);
 });
 
+test("trade plan classifies buy sell position and risk line rules", () => {
+  const strong = {
+    code: "300502",
+    name: "新易盛",
+    price: 100,
+    watchScore: 86,
+    isConfluence: true,
+    breakoutStage: "刚起爆",
+    grade: "强关注",
+    changePct: 3.2,
+    amplitude: 5.4,
+    mainInflow: 180_000_000,
+    superInflow: 90_000_000,
+    ddeNetAmount: 80_000_000,
+    riskLine: "96.00 附近承接"
+  };
+  const chip = {
+    costLow: 96,
+    costHigh: 101,
+    pressure: 110,
+    support: 95,
+    invalid: 93.5,
+    source: "测试筹码"
+  };
+  const plan = buildTradePlan(strong, chip);
+  assert.equal(plan.signalTier, "A类");
+  assert.equal(plan.entryAction, "试买");
+  assert.equal(plan.holdAction, "持有");
+  assert.equal(plan.buyPointType, "试买");
+  assert.equal(plan.position.hint, "首仓10%");
+  assert.equal(plan.position.initialPct, 0.1);
+  assert.equal(plan.position.addToPct, 0.2);
+  assert.equal(plan.position.basis, "account");
+  assert.equal(plan.riskAction, "守风险线");
+  assert.equal(plan.riskLines.hardInvalidValue, 93.5);
+  assert(plan.sellRules.some((rule) => rule.type === "持有"));
+
+  const pressure = buildTradePlan({ ...strong, price: 108, changePct: 7.2 }, chip);
+  assert.equal(pressure.entryAction, "等回踩买");
+  assert.equal(pressure.holdAction, "减仓");
+  assert.equal(pressure.position.hint, "不加仓");
+  assert.equal(pressure.riskAction, "压力位减仓");
+
+  const weak = buildTradePlan({
+    ...strong,
+    watchScore: 42,
+    isConfluence: false,
+    breakoutStage: "",
+    grade: "谨慎",
+    mainInflow: -20_000_000,
+    superInflow: -10_000_000,
+    ddeNetAmount: -30_000_000
+  }, chip);
+  assert.equal(weak.signalTier, "C类");
+  assert.equal(weak.entryAction, "先不买");
+  assert.equal(weak.holdAction, "清仓");
+  assert.equal(weak.riskAction, "破线卖出");
+  assert.equal(weak.position.hint, "空仓");
+});
+
+test("breakout history records first breakout time and deduplicates same trading day", () => {
+  const rows = [{
+    code: "300502",
+    exchange: "SZ",
+    name: "新易盛",
+    sectorName: "AI算力光模块",
+    breakoutStage: "刚起爆",
+    breakoutScore: 82,
+    watchScore: 91,
+    price: 680,
+    changePct: 3.2,
+    amount: 2_000_000_000,
+    volumeRatio: 2.6,
+    mainInflow: 200_000_000,
+    superInflow: 100_000_000,
+    ddeNetAmount: 80_000_000,
+    largeOrderAmount: 700_000_000,
+    tradeAction: "试买",
+    entryAction: "试买",
+    holdAction: "持有",
+    positionHint: "首仓10%",
+    addPositionAction: "首仓后确认",
+    buyPointType: "试买",
+    riskAction: "守风险线",
+    riskLineStatus: "守风险线",
+    operationText: "未持仓：回踩均线或平台确认后试买；已持仓：守风险线持有",
+    riskLine: "650.00 附近承接",
+    tags: ["刚起爆"]
+  }, {
+    code: "000725",
+    exchange: "SZ",
+    name: "京东方A",
+    breakoutStage: "升温"
+  }];
+  const first = mergeBreakoutHistoryRecords([], rows, new Date("2026-06-30T01:35:00.000Z"));
+  assert.equal(first.length, 1);
+  assert.equal(first[0].code, "300502");
+  assert.equal(first[0].breakoutCount, 1);
+  assert.match(first[0].firstBreakoutText, /2026/);
+
+  const second = mergeBreakoutHistoryRecords(first, rows, new Date("2026-06-30T02:05:00.000Z"));
+  assert.equal(second[0].breakoutCount, 1);
+  assert.notEqual(second[0].lastBreakoutText, first[0].lastBreakoutText);
+
+  const payload = buildBreakoutHistoryPayload(second, rows);
+  assert.equal(payload.stats.total, 1);
+  assert.equal(payload.rows[0].currentInWatchlist, true);
+  assert.equal(payload.rows[0].currentStage, "刚起爆");
+  assert.equal(payload.rows[0].currentEntryAction, "试买");
+});
+
 test("watchlist only considers breakout alerts from warming stage and above", () => {
   const hot = {
     code: "300502",
@@ -803,11 +917,20 @@ test("watchlist page exposes merged list, filters, detail modal, and CSV export"
   assert.match(html, /id="dataStatusBadge"/);
   assert.match(html, /id="watchView"/);
   assert.match(html, /id="watchRowsBody"/);
+  assert.match(html, /id="accountAmountInput"/);
+  assert.match(html, /id="accountAmountHint"/);
+  assert.match(html, /id="watchHistoryRowsBody"/);
+  assert.match(html, /起爆历史记录/);
+  assert.match(html, /首次起爆时间/);
   assert.match(html, /id="watchDetailModal"/);
   assert.match(html, /id="watchIntradayChart"/);
   assert.match(html, /id="watchDailyChart"/);
   assert.match(html, /id="hotIntradayChart"/);
   assert.match(html, /id="hotDailyChart"/);
+  assert.match(html, /买入/);
+  assert.match(html, /持仓/);
+  assert.match(html, /仓位/);
+  assert.match(html, /风控/);
   assert.match(html, /EMA5 \/ EMA10 \/ EMA20/);
   assert.match(html, /data-watch-filter="confluence"/);
   assert.match(html, /data-watch-filter="freshBreakout"/);
@@ -818,6 +941,15 @@ test("watchlist page exposes merged list, filters, detail modal, and CSV export"
   assert.match(app, /function renderDataState/);
   assert.match(app, /\/api\/watchlist\?period=/);
   assert.match(app, /function renderWatchDetail/);
+  assert.match(app, /function renderBreakoutHistory/);
+  assert.match(app, /function renderTradePlanCards/);
+  assert.match(app, /function tradeTagClass/);
+  assert.match(app, /ACCOUNT_AMOUNT_STORAGE_KEY/);
+  assert.match(app, /function readAccountAmountControl/);
+  assert.match(app, /完整操作说明/);
+  assert.match(app, /未持仓怎么做/);
+  assert.match(app, /已持仓怎么做/);
+  assert.match(app, /加仓条件/);
   assert.match(app, /function loadStockCharts/);
   assert.match(app, /\/api\/stock-chart\?code=/);
   assert.match(app, /createPriceLine/);
@@ -838,6 +970,11 @@ test("watchlist page exposes merged list, filters, detail modal, and CSV export"
   assert.match(css, /grid-template-columns: 1fr/);
   assert.match(css, /daily-chart-card \.stock-chart/);
   assert.match(app, /function exportWatchCsv/);
+  assert.match(app, /entryAction/);
+  assert.match(app, /holdAction/);
+  assert.match(app, /addPositionAction/);
+  assert.match(app, /positionHint/);
+  assert.match(app, /riskAction/);
   assert.match(app, /watchlist-detail/);
   assert.match(pkg, /lightweight-charts/);
 });

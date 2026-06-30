@@ -35,6 +35,7 @@ const XUEQIU_HOT_URL =
 const NEWS_CACHE_MS = 6 * 60 * 60_000;
 const STOCK_CHIP_CACHE_MS = 30 * 60_000;
 const STOCK_CHART_CACHE_MS = 60_000;
+const BREAKOUT_HISTORY_LIMIT = 200;
 const LIGHTWEIGHT_CHARTS_VENDOR = path.join(__dirname, "node_modules", "lightweight-charts", "dist", "lightweight-charts.standalone.production.js");
 const FIELDS = "f12,f13,f14,f2,f3,f4,f5,f6,f7,f8,f10,f62,f66,f69,f72,f75";
 const BOARD_FIELDS = "f12,f14,f2,f3,f6,f10,f62,f66,f69,f72,f75,f104,f105,f106,f184,f204,f205,f206";
@@ -548,6 +549,425 @@ function riskLine(row) {
   return `${level}；关注 ${invalid.toFixed(2)} 附近承接`;
 }
 
+function buildTradePlan(row, chip = null) {
+  const score = tradeSignalScore(row);
+  const tier = tradeSignalTier(row, score);
+  const riskLines = tradeRiskLines(row, chip);
+  const riskAction = tradeRiskStatus(row, riskLines, chip);
+  const entryAction = tradeEntryAction(row, tier, chip, riskLines);
+  const holdAction = tradeHoldAction(row, tier, chip, riskAction);
+  const addPositionAction = tradeAddPositionAction(row, tier, chip, riskAction, entryAction);
+  const position = tradePosition(row, tier, riskLines, entryAction, holdAction, addPositionAction, riskAction);
+  const buyLogic = tradeBuyLogic(row, entryAction, riskLines, chip);
+  const sellLogic = tradeSellLogic(row, holdAction, riskAction, chip);
+  const addLogic = tradeAddLogic(row, tier, addPositionAction);
+  const riskPlan = tradeRiskPlan(row, riskLines, riskAction);
+  const sellRules = tradeSellRules(row, chip, riskAction);
+  const buyPoints = tradeBuyPoints(row, entryAction, riskLines);
+  const primaryAction = riskAction === "破线卖出" ? "破线卖出" : entryAction;
+  const operationText = tradeOperationText(entryAction, holdAction, addPositionAction, riskAction);
+  return {
+    signalTier: tier,
+    action: primaryAction,
+    entryAction,
+    holdAction,
+    positionAction: position.hint,
+    addPositionAction,
+    riskAction,
+    primaryAction,
+    operationText,
+    buyPointType: entryAction,
+    positionHint: position.hint,
+    riskLineStatus: riskAction,
+    score: Number(score.toFixed(2)),
+    buyPoints,
+    sellRules,
+    buyLogic,
+    sellLogic,
+    addLogic,
+    position,
+    riskLines,
+    riskPlan,
+    summary: tradePlanSummary(tier, primaryAction, position.hint, riskAction)
+  };
+}
+
+function tradeSignalScore(row) {
+  return firstFinite(row.watchScore, row.totalScore, row.breakoutScore, row.score, 0) || 0;
+}
+
+function tradeSignalTier(row, score) {
+  const positiveFlow = isTradePositiveFlow(row);
+  const strongDde = (row.ddeNetAmount || 0) > 0;
+  const fresh = row.isConfluence || row.breakoutStage === "刚起爆" || row.stage === "刚起爆";
+  if (score >= 80 && positiveFlow && strongDde && fresh) return "A类";
+  if (score >= 80 && positiveFlow && strongDde && row.grade === "强关注") return "A类";
+  if (score >= 65 && (positiveFlow || strongDde || row.breakoutStage === "升温" || row.stage === "升温")) return "B类";
+  return "C类";
+}
+
+function isTradePositiveFlow(row) {
+  return (row.mainInflow || 0) > 0 && (row.superInflow || 0) > 0;
+}
+
+function tradeEntryAction(row, tier, chip, riskLines) {
+  if (tradeInvalidated(row, chip)) return "先不买";
+  if (nearPressure(row, chip) || tradeOverheated(row)) return "等回踩买";
+  if (tradeBreakoutConfirmed(row, chip)) return "突破买";
+  if (tradeSupportConfirmed(row, chip)) return "承接区低吸";
+  if (tradePullbackConfirmed(row, chip, riskLines)) return "试买";
+  if (tier === "A类") {
+    const directBuy = (row.changePct || 0) <= 5 && (row.amplitude || 0) <= 8 && isTradePositiveFlow(row) && (row.ddeNetAmount || 0) > 0;
+    return directBuy ? "试买" : "等回踩买";
+  }
+  if (tier === "B类") return "等回踩买";
+  return "先不买";
+}
+
+function tradeHoldAction(row, tier, chip, riskAction) {
+  if (riskAction === "破线卖出") return "清仓";
+  if (riskAction === "压力位减仓" || tradeOverheated(row)) return "减仓";
+  if (tier === "C类") return "清仓";
+  return "持有";
+}
+
+function tradeBreakoutConfirmed(row, chip) {
+  return (
+    Number.isFinite(chip?.costHigh) &&
+    Number.isFinite(row.price) &&
+    row.price > chip.costHigh * 1.005 &&
+    (row.volumeRatio || 0) >= 1.6 &&
+    isTradePositiveFlow(row) &&
+    (row.ddeNetAmount || 0) > 0
+  );
+}
+
+function tradeSupportConfirmed(row, chip) {
+  return (
+    Number.isFinite(chip?.support) &&
+    Number.isFinite(row.price) &&
+    row.price <= chip.support * 1.03 &&
+    isTwoOfThreeMoneyPositive(row) &&
+    !tradeInvalidated(row, chip)
+  );
+}
+
+function tradePullbackConfirmed(row, chip, riskLines) {
+  if (!Number.isFinite(row.price)) return false;
+  const targets = [chip?.costHigh, chip?.support, riskLineNumber(row)]
+    .filter(Number.isFinite)
+    .filter((value) => value > 0);
+  if (!targets.length) return false;
+  const nearestDistance = Math.min(...targets.map((value) => Math.abs(row.price - value) / row.price));
+  return nearestDistance <= 0.008 && isTwoOfThreeMoneyPositive(row) && (row.volumeRatio || 0) >= 1.1 && !tradeInvalidated(row, chip);
+}
+
+function isTwoOfThreeMoneyPositive(row) {
+  return [
+    (row.mainInflow || 0) > 0,
+    (row.superInflow || 0) > 0,
+    (row.ddeNetAmount || 0) > 0
+  ].filter(Boolean).length >= 2;
+}
+
+function tradeInvalidated(row, chip) {
+  if (Number.isFinite(chip?.invalid) && Number.isFinite(row.price) && row.price < chip.invalid) return true;
+  if (Number.isFinite(chip?.support) && Number.isFinite(row.price) && row.price < chip.support * 0.985) return true;
+  if ((row.mainInflow || 0) < 0 && (row.superInflow || 0) < 0 && (row.ddeNetAmount || 0) < 0) return true;
+  return false;
+}
+
+function nearPressure(row, chip) {
+  return Number.isFinite(chip?.pressure) && Number.isFinite(row.price) && row.price >= chip.pressure * 0.98;
+}
+
+function tradeOverheated(row) {
+  return (row.changePct || 0) > 7 || (row.amplitude || 0) > 10;
+}
+
+function tradeRiskLines(row, chip) {
+  const entry = entryRiskLine(row);
+  const structural = Number.isFinite(chip?.support)
+    ? `${priceText(chip.support)} 下方承接区`
+    : row.riskLine || row.risk || "待确认";
+  const hardInvalidValue = firstFinite(
+    chip?.invalid,
+    Number.isFinite(chip?.support) ? chip.support * 0.985 : null,
+    riskLineNumber(row),
+    Number.isFinite(row.price) ? row.price * 0.96 : null
+  );
+  return {
+    entry,
+    structural,
+    hardInvalid: Number.isFinite(hardInvalidValue) ? `${priceText(hardInvalidValue)} 硬失效` : "待确认",
+    hardInvalidValue: Number.isFinite(hardInvalidValue) ? Number(hardInvalidValue.toFixed(3)) : null,
+    source: chip?.source ? `${chip.source} + 当前盘口字段` : "当前盘口字段 + 暗盘资金模型"
+  };
+}
+
+function entryRiskLine(row) {
+  if (row.breakoutStage === "刚起爆" || row.stage === "刚起爆") return "分时均价线或日内平台低点";
+  if (row.breakoutStage === "升温" || row.stage === "升温") return "日内平台低点";
+  return row.riskLine || row.risk || "待确认";
+}
+
+function riskLineNumber(row) {
+  const text = String(row.riskLine || row.risk || "");
+  const matched = text.match(/(\d+(?:\.\d+)?)/);
+  if (matched) return Number(matched[1]);
+  return null;
+}
+
+function tradeRiskStatus(row, riskLines, chip) {
+  if (tradeInvalidated(row, chip)) return "破线卖出";
+  if (Number.isFinite(riskLines.hardInvalidValue) && Number.isFinite(row.price)) {
+    const distance = (row.price - riskLines.hardInvalidValue) / row.price;
+    if (distance <= 0.015) return "盯紧止损";
+  }
+  if (nearPressure(row, chip)) return "压力位减仓";
+  return "守风险线";
+}
+
+function tradeAddPositionAction(row, tier, chip, riskAction, entryAction) {
+  if (riskAction === "破线卖出" || riskAction === "压力位减仓" || tradeOverheated(row) || entryAction === "先不买") return "不加仓";
+  if (tier === "A类" && tradeAddConfirmed(row, chip, 80, 0.02)) return "可加到20%";
+  if (tier === "B类" && tradeAddConfirmed(row, chip, 65, 0)) return "可加到10%";
+  return "首仓后确认";
+}
+
+function tradeAddConfirmed(row, chip, minScore, minProfit) {
+  const score = tradeSignalScore(row);
+  const floatingProfit = firstFinite(row.floatingProfitPct, row.currentProfitPct, row.profitPct, null);
+  const profitConfirmed = Number.isFinite(floatingProfit) ? floatingProfit >= minProfit * 100 : false;
+  return (
+    score >= minScore &&
+    isTradePositiveFlow(row) &&
+    (row.ddeNetAmount || 0) > 0 &&
+    (row.breakoutStage === "刚起爆" || row.breakoutStage === "升温" || row.stage === "刚起爆" || row.stage === "升温" || row.grade === "强关注") &&
+    !nearPressure(row, chip) &&
+    profitConfirmed
+  );
+}
+
+function tradePosition(row, tier, riskLines, entryAction, holdAction, addPositionAction, riskAction) {
+  const empty = {
+    basis: "account",
+    initialPct: 0,
+    addToPct: 0,
+    maxPct: 0,
+    singleStockCapPct: 0,
+    hint: "空仓",
+    addHint: "不加仓",
+    accountAmount: null,
+    initialAmount: null,
+    addToAmount: null,
+    riskBudgetPct: 0,
+    riskBudgetPositionPct: 0
+  };
+  if (riskAction === "破线卖出" || holdAction === "清仓" || entryAction === "先不买") return empty;
+  if (holdAction === "减仓" || addPositionAction === "不加仓") {
+    return {
+      ...empty,
+      hint: "不加仓",
+      singleStockCapPct: 0,
+      addHint: "不加仓"
+    };
+  }
+  const caps = {
+    "A类": { initialPct: 0.1, addToPct: 0.2, maxPct: 0.2, singleStockCapPct: 0.2, hint: "首仓10%" },
+    "B类": { initialPct: 0.05, addToPct: 0.1, maxPct: 0.1, singleStockCapPct: 0.1, hint: "首仓5%" },
+    "C类": { initialPct: 0, addToPct: 0, maxPct: 0, singleStockCapPct: 0, hint: "空仓" }
+  };
+  const base = caps[tier] || caps["C类"];
+  const riskBudgetPct = tier === "A类" ? 0.004 : tier === "B类" ? 0.0025 : 0;
+  const price = row.price;
+  const hardInvalid = riskLines.hardInvalidValue;
+  let riskBudgetPositionPct = base.singleStockCapPct;
+  if (Number.isFinite(price) && Number.isFinite(hardInvalid) && price > hardInvalid && riskBudgetPct > 0) {
+    const riskDistancePct = (price - hardInvalid) / price;
+    riskBudgetPositionPct = Math.min(base.singleStockCapPct, riskBudgetPct / Math.max(riskDistancePct, 0.001));
+  }
+  return {
+    basis: "account",
+    ...base,
+    addHint: addPositionAction,
+    accountAmount: null,
+    initialAmount: null,
+    addToAmount: null,
+    riskBudgetPct,
+    riskBudgetPositionPct: Number(riskBudgetPositionPct.toFixed(4)),
+    initialPct: Number(base.initialPct.toFixed(2)),
+    addToPct: Number(base.addToPct.toFixed(2)),
+    maxPct: Number(base.maxPct.toFixed(2)),
+    singleStockCapPct: Number(base.singleStockCapPct.toFixed(2))
+  };
+}
+
+function tradeSellRules(row, chip, riskStatus) {
+  const rules = [];
+  if (nearPressure(row, chip) || tradeOverheated(row)) {
+    rules.push({ type: "减仓", trigger: "接近压力区、涨幅或振幅偏高", action: "分批卖出" });
+  }
+  if (isTradePositiveFlow(row) && (row.ddeNetAmount || 0) > 0 && riskStatus === "守风险线") {
+    rules.push({ type: "持有", trigger: "资金双正且DDE大单为正", action: "持有到风险线破位" });
+  }
+  rules.push({ type: "止损", trigger: "跌破硬失效线或资金三项转负", action: "破线卖出" });
+  rules.push({ type: "撤单", trigger: "3日未放量上攻或5日盯盘分持续下降", action: "取消加仓" });
+  return rules;
+}
+
+function tradeBuyPoints(row, buyPointType, riskLines) {
+  const map = {
+    "试买": "回踩均价线、日内平台或成本区后缩量企稳，资金至少两项为正",
+    "等回踩买": "等待分时均价线、日内平台、大单成本区或下方承接区确认",
+    "突破买": "放量突破成本区上沿或日内平台，资金双正维持",
+    "承接区低吸": "靠近下方承接区后快速收回，主力和超大单保持为正",
+    "先不买": "等待资金回正、风险线重新收复或起爆信号恢复"
+  };
+  return [{
+    type: buyPointType,
+    trigger: map[buyPointType] || map["等回踩买"],
+    riskLine: riskLines.entry
+  }];
+}
+
+function tradeBuyLogic(row, entryAction, riskLines, chip) {
+  const pullbackTargets = [
+    "分时均价线",
+    "日内平台低点",
+    Number.isFinite(chip?.costHigh) ? `${priceText(chip.costHigh)} 大单成本区上沿` : "大单成本区上沿/成本区内",
+    Number.isFinite(chip?.support) ? `${priceText(chip.support)} 下方承接区` : "下方承接区"
+  ];
+  if (entryAction === "试买") {
+    return [
+      "盯盘分达到A类或回踩确认条件",
+      "主力、超大单、DDE至少两项为正",
+      "涨幅不透支，振幅可控",
+      `买点失效线：${riskLines.entry}`
+    ];
+  }
+  if (entryAction === "等回踩买") {
+    return [
+      `回踩位置：${pullbackTargets.join(" → ")}`,
+      "当前价距离目标位0.8%以内后观察缩量承接",
+      "重新站回均价线或平台位后升级为买入",
+      "资金至少两项为正，硬止损线保持有效"
+    ];
+  }
+  if (entryAction === "突破买") {
+    return [
+      "放量突破日内平台或成本区上沿",
+      "突破后回踩平台不破",
+      "资金双正和DDE大单为正",
+      "板块保持强势或升温"
+    ];
+  }
+  if (entryAction === "承接区低吸") {
+    return [
+      "价格回踩下方承接区或成本区内企稳",
+      "缩量回踩后快速收回",
+      "主力、超大单、DDE至少两项为正",
+      `结构风险线：${riskLines.structural}`
+    ];
+  }
+  return [
+    "资金三项偏弱或结构风险线已破",
+    "等待主力、超大单、DDE重新转强",
+    "等待起爆阶段或热度排名恢复",
+    `硬止损线：${riskLines.hardInvalid}`
+  ];
+}
+
+function tradeSellLogic(row, holdAction, riskAction, chip) {
+  const rules = [];
+  if (holdAction === "持有") rules.push("价格在大单成本区上方且资金三项保持正向时持有");
+  if (holdAction === "减仓") rules.push("接近压力区、涨幅超过7%或振幅超过10%时减仓");
+  if (holdAction === "清仓") rules.push("跌破硬止损线、下方承接区失守或资金三项转负时清仓");
+  rules.push("分时跌破均价线后反抽无量，降低仓位");
+  rules.push("热度排名快速回落或起爆阶段降级，收紧风控");
+  if (riskAction === "压力位减仓" && Number.isFinite(chip?.pressure)) rules.push(`压力区参考：${priceText(chip.pressure)}`);
+  return rules;
+}
+
+function tradeAddLogic(row, tier, addPositionAction) {
+  if (addPositionAction === "可加到20%") {
+    return [
+      "已持有A类首仓",
+      "价格站稳买点上方",
+      "主力、超大单、DDE继续为正",
+      "盯盘分维持80分以上，浮盈约2%以上"
+    ];
+  }
+  if (addPositionAction === "可加到10%") {
+    return [
+      "已持有B类首仓",
+      "回踩确认完成",
+      "资金至少两项为正",
+      "盯盘分维持65分以上，风险线未破"
+    ];
+  }
+  if (addPositionAction === "首仓后确认") {
+    return [
+      tier === "A类" ? "先按账户总资金10%建立首仓" : "先按账户总资金5%建立首仓",
+      "买入后站稳买点上方再评估加仓",
+      "接近压力区时停止加仓"
+    ];
+  }
+  return ["当前不加仓，优先执行风控或等待新买点"];
+}
+
+function tradeRiskPlan(row, riskLines, riskAction) {
+  return {
+    entryInvalidLine: riskLines.entry,
+    structuralRiskLine: riskLines.structural,
+    hardStopLine: riskLines.hardInvalid,
+    hardStopValue: riskLines.hardInvalidValue,
+    action: riskAction,
+    invalidCondition: riskAction === "破线卖出"
+      ? "跌破硬止损线或资金三项转负"
+      : "跌破买点失效线后观察能否快速收回"
+  };
+}
+
+function tradeOperationText(entryAction, holdAction, addPositionAction, riskAction) {
+  const entryMap = {
+    "试买": "回踩均线或平台确认后试买",
+    "等回踩买": "等待回踩到均价线、平台位或成本区",
+    "突破买": "放量突破平台后回踩不破再买",
+    "承接区低吸": "回踩承接区企稳后低吸",
+    "先不买": "等待资金和结构重新转强"
+  };
+  const holdMap = {
+    "持有": "守风险线持有",
+    "减仓": "接近压力位或资金转弱先减仓",
+    "清仓": "破线或资金三项转负清仓"
+  };
+  return `未持仓：${entryMap[entryAction] || "等待确认"}；已持仓：${holdMap[holdAction] || "按风险线处理"}；加仓：${addPositionAction}；风控：${riskAction}`;
+}
+
+function tradePlanSummary(tier, action, positionHint, riskStatus) {
+  return `${tier} · ${action} · ${positionHint} · ${riskStatus}`;
+}
+
+function attachTradePlan(row, chip = null) {
+  const tradePlan = buildTradePlan(row, chip);
+  return {
+    ...row,
+    tradePlan,
+    tradeAction: tradePlan.primaryAction,
+    entryAction: tradePlan.entryAction,
+    holdAction: tradePlan.holdAction,
+    positionAction: tradePlan.positionAction,
+    addPositionAction: tradePlan.addPositionAction,
+    riskAction: tradePlan.riskAction,
+    operationText: tradePlan.operationText,
+    positionHint: tradePlan.positionHint,
+    buyPointType: tradePlan.buyPointType,
+    riskLineStatus: tradePlan.riskLineStatus,
+    signalTier: tradePlan.signalTier
+  };
+}
+
 function parseKlines(payload) {
   const lines = payload?.data?.klines;
   if (!Array.isArray(lines)) return [];
@@ -877,6 +1297,120 @@ function recordHotSnapshot(rows) {
   writeHotHistory({ snapshots: snapshots.slice(-8) });
 }
 
+function readBreakoutHistory() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(cachePath("watch-breakout-history"), "utf8"));
+    return Array.isArray(parsed.records) ? parsed : { records: [] };
+  } catch {
+    return { records: [] };
+  }
+}
+
+function writeBreakoutHistory(history) {
+  try {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    fs.writeFileSync(cachePath("watch-breakout-history"), JSON.stringify(history), "utf8");
+  } catch {
+    // History writes are best-effort.
+  }
+}
+
+function chinaDateTimeText(date = new Date()) {
+  return date.toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" }).replace(/\//g, "-");
+}
+
+function mergeBreakoutHistoryRecords(existingRecords = [], rows = [], now = new Date()) {
+  const today = tradingDateKey(now);
+  const nowIso = now.toISOString();
+  const nowText = chinaDateTimeText(now);
+  const byCode = new Map((existingRecords || []).filter((item) => item?.code).map((item) => [item.code, item]));
+  rows.filter((row) => row?.breakoutStage === "刚起爆").forEach((row) => {
+    const previous = byCode.get(row.code);
+    const nextCount = previous?.lastBreakoutDate === today ? previous.breakoutCount || 1 : (previous?.breakoutCount || 0) + 1;
+    byCode.set(row.code, {
+      code: row.code,
+      exchange: row.exchange,
+      name: row.name,
+      sectorName: row.sectorName,
+      firstBreakoutAt: previous?.firstBreakoutAt || nowIso,
+      firstBreakoutText: previous?.firstBreakoutText || nowText,
+      firstBreakoutDate: previous?.firstBreakoutDate || today,
+      lastBreakoutAt: nowIso,
+      lastBreakoutText: nowText,
+      lastBreakoutDate: today,
+      breakoutCount: nextCount,
+      latestStage: row.breakoutStage,
+      latestScore: row.breakoutScore,
+      latestWatchScore: row.watchScore,
+      latestPrice: row.price,
+      latestChangePct: row.changePct,
+      latestAmount: row.amount,
+      latestVolumeRatio: row.volumeRatio,
+      latestMainInflow: row.mainInflow,
+      latestSuperInflow: row.superInflow,
+      latestDdeNetAmount: row.ddeNetAmount,
+      latestLargeOrderAmount: row.largeOrderAmount,
+      latestTradeAction: row.tradeAction,
+      latestEntryAction: row.entryAction,
+      latestHoldAction: row.holdAction,
+      latestPositionHint: row.positionHint,
+      latestAddPositionAction: row.addPositionAction,
+      latestBuyPointType: row.buyPointType,
+      latestRiskAction: row.riskAction,
+      latestRiskLineStatus: row.riskLineStatus,
+      latestOperationText: row.operationText,
+      latestRiskLine: row.riskLine,
+      latestWatchNote: row.watchNote,
+      latestTags: row.tags || []
+    });
+  });
+  return [...byCode.values()]
+    .sort((a, b) => Date.parse(b.lastBreakoutAt || 0) - Date.parse(a.lastBreakoutAt || 0))
+    .slice(0, BREAKOUT_HISTORY_LIMIT);
+}
+
+function buildBreakoutHistoryPayload(records = [], currentRows = []) {
+  const today = tradingDateKey();
+  const currentByCode = new Map(currentRows.map((row) => [row.code, row]));
+  const rows = records.slice(0, 30).map((record, index) => {
+    const current = currentByCode.get(record.code);
+    return {
+      ...record,
+      rank: index + 1,
+      currentInWatchlist: Boolean(current),
+      currentStage: current?.breakoutStage || record.latestStage || "历史起爆",
+      currentWatchScore: current?.watchScore ?? record.latestWatchScore ?? null,
+      currentTradeAction: current?.tradeAction || record.latestTradeAction || "待确认",
+      currentEntryAction: current?.entryAction || record.latestEntryAction || current?.tradeAction || record.latestTradeAction || "待确认",
+      currentHoldAction: current?.holdAction || record.latestHoldAction || "待确认",
+      currentPositionHint: current?.positionHint || record.latestPositionHint || "待确认",
+      currentAddPositionAction: current?.addPositionAction || record.latestAddPositionAction || "待确认",
+      currentRiskAction: current?.riskAction || record.latestRiskAction || current?.riskLineStatus || record.latestRiskLineStatus || "待确认",
+      currentRiskLineStatus: current?.riskLineStatus || record.latestRiskLineStatus || "待确认",
+      currentOperationText: current?.operationText || record.latestOperationText || "",
+      currentRiskLine: current?.riskLine || record.latestRiskLine || "待确认",
+      currentChangePct: current?.changePct ?? record.latestChangePct ?? null,
+      currentTags: current?.tags || record.latestTags || []
+    };
+  });
+  return {
+    stats: {
+      total: records.length,
+      today: records.filter((record) => record.lastBreakoutDate === today).length,
+      current: rows.filter((record) => record.currentInWatchlist).length,
+      latestTime: rows[0]?.lastBreakoutText || ""
+    },
+    rows
+  };
+}
+
+function recordBreakoutHistory(rows = []) {
+  const history = readBreakoutHistory();
+  const records = mergeBreakoutHistoryRecords(history.records, rows);
+  writeBreakoutHistory({ records });
+  return buildBreakoutHistoryPayload(records, rows);
+}
+
 function mergeXueqiuHotRows(hithinkRows, xueqiuRows) {
   const xueqiuByCode = new Map(xueqiuRows.map((row) => [row.code, row]));
   let matched = 0;
@@ -969,7 +1503,7 @@ function enrichHotLeader(row, period, history, sectorStats, maxRank) {
   enriched.riskLine = hotRiskLine(enriched);
   enriched.invalidCondition = hotInvalidCondition(enriched);
   enriched.entryCondition = hotEntryCondition(enriched);
-  return enriched;
+  return attachTradePlan(enriched);
 }
 
 function estimateRankChange(row, period) {
@@ -1204,7 +1738,7 @@ function enrichBreakoutAlert(row, hotRef, sector = {}) {
   enriched.reason = breakoutReason(enriched);
   enriched.risk = breakoutRisk(enriched);
   enriched.entryCondition = breakoutEntryCondition(enriched);
-  return enriched;
+  return attachTradePlan(enriched);
 }
 
 function scoreBreakoutVolume(row) {
@@ -1302,13 +1836,16 @@ async function scan(url) {
   const rows = rawRows
     .map(normalize)
     .filter((row) => keep(row, params))
-    .map((row) => ({
-      ...row,
-      score: scoreStock(row),
-      tag: classify(row),
-      reason: explain(row),
-      risk: riskLine(row)
-    }))
+    .map((row) => {
+      const enriched = {
+        ...row,
+        score: scoreStock(row),
+        tag: classify(row),
+        reason: explain(row),
+        risk: riskLine(row)
+      };
+      return attachTradePlan(enriched);
+    })
     .sort((a, b) => b.score - a.score)
     .slice(0, params.limit);
   const stats = {
@@ -1402,13 +1939,16 @@ async function sectorDetail(url) {
   const rows = stocks
     .map(normalize)
     .filter((row) => row && row.amount >= 200_000_000)
-    .map((row) => ({
-      ...row,
-      score: scoreStock(row),
-      tag: classify(row),
-      reason: explain(row),
-      risk: riskLine(row)
-    }))
+    .map((row) => {
+      const enriched = {
+        ...row,
+        score: scoreStock(row),
+        tag: classify(row),
+        reason: explain(row),
+        risk: riskLine(row)
+      };
+      return attachTradePlan(enriched);
+    })
     .sort((a, b) => b.score - a.score)
     .slice(0, 30);
   const news = await getSectorNews(enrichedBoard, rows);
@@ -1488,11 +2028,16 @@ async function buildHotLeaderDetail(code, period) {
   if (!row) throw new Error("Stock not found in hot list");
   const chip = await getStockChipInsight(row);
   const diagnosis = buildAiStockDiagnosis(row, chip);
+  const detailedRow = attachTradePlan({
+    ...row,
+    riskLine: chip.enhancedRiskLine || row.riskLine,
+    invalidCondition: `${row.invalidCondition}；${diagnosis.invalidCondition}`
+  }, chip);
   return {
     timestamp: new Date().toLocaleString("zh-CN", { hour12: false, timeZoneName: "short" }),
     source: "同花顺问财 OpenAPI · 个股热度排名 + 雪球热股榜",
     period,
-    row,
+    row: detailedRow,
     detail: {
       heat: `同花顺第${row.heatRank}，热度值${Number.isFinite(row.heatValue) ? row.heatValue.toFixed(0) : "待确认"}；雪球${Number.isFinite(row.xueqiuRank) ? `第${row.xueqiuRank}，热度${Number.isFinite(row.xueqiuHeatValue) ? row.xueqiuHeatValue.toFixed(0) : "待确认"}，变化${rankChangeLabel(row.xueqiuRankChange)}` : "未上榜"}；${row.rankChange === null ? "同花顺热度变化待确认" : row.rankChange >= 0 ? `同花顺排名上升${row.rankChange}` : `同花顺排名回落${Math.abs(row.rankChange)}`}`,
       flow: `主力${moneyShort(row.mainInflow)}，超大单${moneyShort(row.superInflow)}，大单${moneyShort(row.largeInflow)}，DDE${moneyShort(row.ddeNetAmount)}，大单总额${moneyShort(row.largeOrderAmount)}`,
@@ -1507,9 +2052,11 @@ async function buildHotLeaderDetail(code, period) {
       chipSupport: chip.supportText,
       chipPosition: chip.positionText,
       chipSource: `${chip.source}${chip.warning ? `；${chip.warning}` : ""}`,
+      chipData: chip,
       entryCondition: row.entryCondition,
-      riskLine: chip.enhancedRiskLine || row.riskLine,
-      invalidCondition: `${row.invalidCondition}；${diagnosis.invalidCondition}`
+      riskLine: detailedRow.riskLine,
+      invalidCondition: detailedRow.invalidCondition,
+      tradePlan: detailedRow.tradePlan
     }
   };
 }
@@ -1554,7 +2101,9 @@ async function buildWatchlistPayload(period, limit) {
     warnings.push(`起爆预警暂不可用：${compactError(error.message)}`);
   }
 
-  const rows = mergeWatchlistRows(hotRows, breakoutRows, limit);
+  const mergedRows = mergeWatchlistRows(hotRows, breakoutRows, Math.max(limit, 120));
+  const rows = mergedRows.slice(0, limit);
+  const breakoutHistory = recordBreakoutHistory(mergedRows);
   const stats = {
     total: rows.length,
     confluence: rows.filter((row) => row.isConfluence).length,
@@ -1572,6 +2121,7 @@ async function buildWatchlistPayload(period, limit) {
     dataState: combineDataStates(dataStates, "盯盘总榜"),
     period,
     stats,
+    breakoutHistory,
     rows
   };
 }
@@ -1659,7 +2209,7 @@ function enrichWatchlistRow(hot, breakout) {
   };
   row.tags = watchTags(row);
   row.watchNote = watchNote(row);
-  return row;
+  return attachTradePlan(row);
 }
 
 function scoreWatchlistRow(hot, breakout) {
@@ -1745,25 +2295,32 @@ async function watchlistDetail(url) {
   if (row.hasHot) {
     hotDetail = await buildHotLeaderDetail(code, period).catch(() => null);
   }
+  const chip = hotDetail?.detail?.chipData || null;
+  const detailRow = attachTradePlan({
+    ...row,
+    riskLine: chip?.enhancedRiskLine || row.riskLine,
+    invalidCondition: hotDetail?.row?.invalidCondition || row.invalidCondition
+  }, chip);
   return {
     timestamp: new Date().toLocaleString("zh-CN", { hour12: false, timeZoneName: "short" }),
     source: payload.source,
     warning: payload.warning,
     period,
-    row,
+    row: detailRow,
     detail: {
       hot: hotDetail?.detail || null,
-      breakout: row.hasBreakout ? {
-        reason: row.breakoutReason,
-        stage: row.breakoutStage,
-        volumeScore: row.volumeScore,
-        heatScore: row.heatScore,
-        carryScore: row.carryScore,
-        sectorScore: row.sectorScore,
-        entryCondition: row.entryCondition,
-        risk: row.riskLine
+      breakout: detailRow.hasBreakout ? {
+        reason: detailRow.breakoutReason,
+        stage: detailRow.breakoutStage,
+        volumeScore: detailRow.volumeScore,
+        heatScore: detailRow.heatScore,
+        carryScore: detailRow.carryScore,
+        sectorScore: detailRow.sectorScore,
+        entryCondition: detailRow.entryCondition,
+        risk: detailRow.riskLine
       } : null,
-      confluence: watchConfluenceText(row)
+      confluence: watchConfluenceText(detailRow),
+      tradePlan: detailRow.tradePlan
     }
   };
 }
@@ -3593,6 +4150,8 @@ module.exports = {
   makeBreakoutAlertRows,
   enrichBreakoutAlert,
   mergeWatchlistRows,
+  mergeBreakoutHistoryRecords,
+  buildBreakoutHistoryPayload,
   scoreWatchlistRow,
   watchTags,
   isWatchlistBreakoutStage,
@@ -3602,6 +4161,7 @@ module.exports = {
   scoreBreakoutFlow,
   scoreHeat,
   scoreStock,
+  buildTradePlan,
   buildStockChipInsight,
   buildAiStockDiagnosis,
   buildRuleSectorInterpretation,

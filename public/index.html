@@ -153,6 +153,13 @@
             <button class="watch-period" type="button" data-watch-period="3">3日</button>
             <button class="watch-period" type="button" data-watch-period="5">5日</button>
           </div>
+          <div class="account-settings" aria-label="账户资金设置">
+            <label>
+              <span>账户资金</span>
+              <input id="accountAmountInput" type="number" inputmode="decimal" min="0" step="10000" placeholder="例如 1000000">
+            </label>
+            <span id="accountAmountHint">未填写，仅显示仓位比例</span>
+          </div>
           <div class="alert-settings" aria-label="起爆警报设置">
             <label class="toggle-row">
               <input id="breakoutAlertEnabled" type="checkbox">
@@ -232,6 +239,35 @@
           <div id="watchState" class="state-line" role="status"></div>
         </section>
 
+        <section class="table-section" aria-label="起爆历史记录">
+          <div class="section-head">
+            <div>
+              <h2>起爆历史记录</h2>
+              <p id="watchHistoryState">记录进入“刚起爆”阶段的股票，并标注首次起爆时间</p>
+            </div>
+          </div>
+          <div class="table-wrap watch-history-wrap">
+            <table class="watch-history-table">
+              <thead>
+                <tr>
+                  <th>首次起爆时间</th>
+                  <th>最近触发</th>
+                  <th>代码</th>
+                  <th>名称</th>
+                  <th>板块</th>
+                  <th>次数</th>
+                  <th>当前阶段</th>
+                  <th>盯盘分</th>
+                  <th>涨跌幅</th>
+                  <th>买入</th>
+                  <th>风险线</th>
+                </tr>
+              </thead>
+              <tbody id="watchHistoryRowsBody"></tbody>
+            </table>
+          </div>
+        </section>
+
         <section class="table-section" aria-label="盯盘总榜排行榜">
           <div class="section-head">
             <div>
@@ -250,6 +286,9 @@
                   <th data-watch-sort="watchScore">盯盘分</th>
                   <th data-watch-sort="sourceType">来源标签</th>
                   <th data-watch-sort="breakoutStage">起爆阶段</th>
+                  <th data-watch-sort="entryAction">买入</th>
+                  <th data-watch-sort="holdAction">持仓</th>
+                  <th data-watch-sort="positionHint">仓位</th>
                   <th data-watch-sort="heatRank">热度排名</th>
                   <th data-watch-sort="xueqiuRank">雪球排名</th>
                   <th data-watch-sort="changePct">涨跌幅</th>
@@ -259,6 +298,7 @@
                   <th data-watch-sort="superInflow">超大单</th>
                   <th data-watch-sort="ddeNetAmount">DDE大单</th>
                   <th data-watch-sort="largeOrderAmount">大单总额</th>
+                  <th data-watch-sort="riskLineStatus">风控</th>
                   <th>风险线</th>
                   <th>盯盘备注</th>
                 </tr>
@@ -502,6 +542,10 @@
                   <th data-hot-sort="conceptNote">炒作概念/备注</th>
                   <th data-hot-sort="totalScore">综合评分</th>
                   <th data-hot-sort="grade">推荐等级</th>
+                  <th data-hot-sort="entryAction">买入</th>
+                  <th data-hot-sort="holdAction">持仓</th>
+                  <th data-hot-sort="positionHint">仓位</th>
+                  <th data-hot-sort="riskLineStatus">风控</th>
                   <th>短线承接理由</th>
                   <th>风险收益判断</th>
                   <th>风险线</th>
